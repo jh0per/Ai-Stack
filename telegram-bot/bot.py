@@ -707,26 +707,29 @@ def build_storage_report() -> str:
     nodes = data.get("nodes", [])
     drives = data.get("drives", [])
     pools = data.get("pools", [])
+    shown_issues = issues[:12]
 
     lines = [
-        "🧭 Storage status",
+        "🧭 Статус сховища",
         f"Стан: {data.get('status', 'unknown').upper()}",
         f"Час: {data.get('checked_at', '-')}",
         "",
         data.get("summary", ""),
         "",
-        f"Nodes OK: {sum(1 for n in nodes if n.get('status') == 'ok')}/{len(nodes)}",
+        f"Ноди OK: {sum(1 for n in nodes if n.get('status') == 'ok')}/{len(nodes)}",
         f"Pools ONLINE: {sum(1 for p in pools if p.get('health') == 'ONLINE')}/{len(pools)}",
         f"SMART drives: {len(drives)}",
     ]
 
     if issues:
-        lines.extend(["", "Проблеми:"])
-        for issue in issues[:12]:
+        lines.extend(["", f"Проблеми, показано {len(shown_issues)} з {len(issues)}:"])
+        for issue in shown_issues:
             lines.append(
                 f"- {issue.get('status', 'unknown')}: "
                 f"{issue.get('area', '-')}: {issue.get('message', '-')}"
             )
+        if len(issues) > len(shown_issues):
+            lines.append(f"...ще {len(issues) - len(shown_issues)} проблем у /problems")
     else:
         lines.extend(["", "Проблем не знайдено."])
 

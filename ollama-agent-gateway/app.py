@@ -621,6 +621,11 @@ def analyze_storage(raw: dict[str, str], checked_at: str) -> StorageStatusRespon
     node_storage = extract_node_storage_usage(
         raw.get("storage_usage_json") or raw.get("node_storage_usage_json", "")
     )
+    node_storage_mounts = {
+        item.get("mountpoint")
+        for item in node_storage
+        if item.get("mountpoint")
+    }
     nodes = extract_nodes(raw.get("docker_containers_json", ""), raw.get("system_services", ""))
     zpool_status_x = raw.get("zpool_status_x", "")
 
@@ -645,6 +650,9 @@ def analyze_storage(raw: dict[str, str], checked_at: str) -> StorageStatusRespon
     for fs in filesystems:
         use_percent = fs["use_percent"]
         mountpoint = fs["mountpoint"]
+
+        if mountpoint in node_storage_mounts:
+            continue
 
         if use_percent is not None and use_percent >= 90:
             add_issue(issues, 3, "space", msg(f"{mountpoint} заповнений на {use_percent:.0f}%.", f"{mountpoint} is {use_percent:.0f}% full."), msg("Звільни місце або перенеси дані.", "Free space or move data."))
