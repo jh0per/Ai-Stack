@@ -175,10 +175,14 @@ The current Telegram bot commands are still ZFS-oriented. The HTTP gateway statu
 
 Useful Telegram commands:
 
-- `/storage` - generic storage/Sia/Storj/filesystem status from the gateway
+- `/status` - main generic storage/Sia/Storj/filesystem status from the gateway
+- `/problems` - only storage problems from the gateway
 - `/smart` - SMART and disk health summary from the gateway
-- `/status` - legacy ZFS-focused status
-- `/problems` - legacy ZFS-focused problems
+- `/storage` - alias-style explicit storage status command
+- `/health` - alias for `/status`
+- `/disks` - alias for `/smart`
+- `/zfs` - legacy ZFS-focused status
+- `/pools`, `/datasets`, `/raw`, `/intro`, `/askzfs` - ZFS-only commands
 
 ## Optional SearXNG
 

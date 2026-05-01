@@ -779,6 +779,36 @@ def build_smart_report() -> str:
     return "\n".join(lines).strip()
 
 
+def build_storage_problems_report() -> str:
+    data = fetch_storage_status()
+    issues = data.get("issues", [])
+
+    lines = [
+        "🚨 Storage problems",
+        f"Стан: {data.get('status', 'unknown').upper()}",
+        f"Час: {data.get('checked_at', '-')}",
+        "",
+    ]
+
+    if not issues:
+        lines.append("Проблем не знайдено.")
+        return "\n".join(lines).strip()
+
+    for issue in issues[:30]:
+        action = issue.get("action")
+        lines.append(
+            f"- {issue.get('status', 'unknown')}: "
+            f"{issue.get('area', '-')}: {issue.get('message', '-')}"
+        )
+        if action:
+            lines.append(f"  Дія: {action}")
+
+    if len(issues) > 30:
+        lines.append(f"...ще {len(issues) - 30} проблем")
+
+    return "\n".join(lines).strip()
+
+
 def is_allowed(update: Update) -> bool:
     if not update.effective_chat:
         return False
@@ -813,7 +843,12 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Немає доступу. Спочатку /start і додай chat_id в .env.")
         return
 
-    report = await asyncio.to_thread(build_status_report)
+    await update.message.reply_text("Збираю storage status...")
+    try:
+        report = await asyncio.to_thread(build_storage_report)
+    except Exception as e:
+        report = f"⚠️ storage status error: {e}"
+
     await send_long_message(context, update.effective_chat.id, report)
 
 
@@ -822,7 +857,21 @@ async def problems_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Немає доступу.")
         return
 
-    report = await asyncio.to_thread(build_problems_report)
+    await update.message.reply_text("Збираю список проблем...")
+    try:
+        report = await asyncio.to_thread(build_storage_problems_report)
+    except Exception as e:
+        report = f"⚠️ storage problems error: {e}"
+
+    await send_long_message(context, update.effective_chat.id, report)
+
+
+async def zfs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        await update.message.reply_text("⛔ Немає доступу.")
+        return
+
+    report = await asyncio.to_thread(build_status_report)
     await send_long_message(context, update.effective_chat.id, report)
 
 
@@ -944,16 +993,19 @@ async def askzfs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "Команди:\n\n"
-        "/status — короткий статус: ок або проблеми\n"
-        "/problems — тільки проблеми\n"
-        "/pools — список пулів\n"
-        "/datasets — найбільші datasets\n"
-        "/storage — повний storage/Sia/Storj/FS статус\n"
+        "/status — головний storage/Sia/Storj/FS статус\n"
+        "/problems — тільки storage проблеми\n"
         "/smart — SMART/disk health\n"
+        "/ask питання — спитати Ollama\n"
+        "\n"
+        "ZFS-only:\n"
+        "/zfs — legacy ZFS статус\n"
+        "/pools — ZFS pools\n"
+        "/datasets — ZFS datasets\n"
         "/raw — сирі zpool/zfs дані\n"
         "/intro — AI короткий висновок по ZFS\n"
-        "/ask питання — спитати Ollama\n"
         "/askzfs питання — спитати Ollama з ZFS контекстом\n"
+        "\n"
         "/start — показати chat_id\n"
         "/help — допомога"
     )
@@ -1022,11 +1074,14 @@ def main():
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CommandHandler("health", status_cmd))
     app.add_handler(CommandHandler("problems", problems_cmd))
+    app.add_handler(CommandHandler("zfs", zfs_cmd))
     app.add_handler(CommandHandler("pools", pools_cmd))
     app.add_handler(CommandHandler("datasets", datasets_cmd))
     app.add_handler(CommandHandler("storage", storage_cmd))
     app.add_handler(CommandHandler("smart", smart_cmd))
+    app.add_handler(CommandHandler("disks", smart_cmd))
     app.add_handler(CommandHandler("raw", raw_cmd))
     app.add_handler(CommandHandler("intro", intro_cmd))
     app.add_handler(CommandHandler("ask", ask_cmd))
