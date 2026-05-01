@@ -45,6 +45,10 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:3b").strip()
 
 ZPOOL = os.getenv("ZPOOL_BIN", "/usr/sbin/zpool").strip()
 ZFS = os.getenv("ZFS_BIN", "/usr/sbin/zfs").strip()
+STORAGE_STATUS_URL = os.getenv(
+    "STORAGE_STATUS_URL",
+    "http://127.0.0.1:3700/storage/status",
+).strip()
 
 
 @dataclass
@@ -690,6 +694,91 @@ def build_intro_report() -> str:
     )
 
 
+def fetch_storage_status() -> dict:
+    response = requests.get(STORAGE_STATUS_URL, timeout=60)
+    response.raise_for_status()
+    return response.json()
+
+
+def build_storage_report() -> str:
+    data = fetch_storage_status()
+    issues = data.get("issues", [])
+    recommendations = data.get("recommendations", [])
+    nodes = data.get("nodes", [])
+    drives = data.get("drives", [])
+    pools = data.get("pools", [])
+
+    lines = [
+        "🧭 Storage status",
+        f"Стан: {data.get('status', 'unknown').upper()}",
+        f"Час: {data.get('checked_at', '-')}",
+        "",
+        data.get("summary", ""),
+        "",
+        f"Nodes OK: {sum(1 for n in nodes if n.get('status') == 'ok')}/{len(nodes)}",
+        f"Pools ONLINE: {sum(1 for p in pools if p.get('health') == 'ONLINE')}/{len(pools)}",
+        f"SMART drives: {len(drives)}",
+    ]
+
+    if issues:
+        lines.extend(["", "Проблеми:"])
+        for issue in issues[:12]:
+            lines.append(
+                f"- {issue.get('status', 'unknown')}: "
+                f"{issue.get('area', '-')}: {issue.get('message', '-')}"
+            )
+    else:
+        lines.extend(["", "Проблем не знайдено."])
+
+    if recommendations:
+        lines.extend(["", "Дії:"])
+        for item in recommendations[:6]:
+            lines.append(f"- {item}")
+
+    return "\n".join(lines).strip()
+
+
+def build_smart_report() -> str:
+    data = fetch_storage_status()
+    drives = data.get("drives", [])
+
+    lines = [
+        "💾 SMART / disk health",
+        f"Час: {data.get('checked_at', '-')}",
+        f"Disks: {len(drives)}",
+        "",
+    ]
+
+    if not drives:
+        lines.append("SMART диски не знайдені або gateway не повернув drive дані.")
+        return "\n".join(lines).strip()
+
+    problem_drives = [
+        d for d in drives
+        if d.get("status") not in ("ok", None) or d.get("reallocated") or d.get("pending") or d.get("uncorrectable")
+    ]
+
+    if not problem_drives:
+        lines.append("Явних SMART проблем не знайдено в доступних даних.")
+        lines.append("Якщо всі диски unknown, перевір права smartctl/sudo.")
+    else:
+        lines.append("Проблемні/невідомі диски:")
+
+    for drive in (problem_drives or drives)[:24]:
+        reasons = ", ".join(drive.get("reasons", [])) or "-"
+        model = drive.get("model") or "-"
+        serial = drive.get("serial") or "-"
+        lines.append(
+            f"- {drive.get('name')}: {drive.get('status')} | "
+            f"{model} | serial {serial} | "
+            f"realloc={drive.get('reallocated')} "
+            f"pending={drive.get('pending')} "
+            f"uncorr={drive.get('uncorrectable')} | {reasons}"
+        )
+
+    return "\n".join(lines).strip()
+
+
 def is_allowed(update: Update) -> bool:
     if not update.effective_chat:
         return False
@@ -764,6 +853,34 @@ async def raw_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_long_message(context, update.effective_chat.id, report)
 
 
+async def storage_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        await update.message.reply_text("⛔ Немає доступу.")
+        return
+
+    await update.message.reply_text("Збираю storage status...")
+    try:
+        report = await asyncio.to_thread(build_storage_report)
+    except Exception as e:
+        report = f"⚠️ storage status error: {e}"
+
+    await send_long_message(context, update.effective_chat.id, report)
+
+
+async def smart_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        await update.message.reply_text("⛔ Немає доступу.")
+        return
+
+    await update.message.reply_text("Збираю SMART/disk health...")
+    try:
+        report = await asyncio.to_thread(build_smart_report)
+    except Exception as e:
+        report = f"⚠️ SMART status error: {e}"
+
+    await send_long_message(context, update.effective_chat.id, report)
+
+
 async def intro_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update):
         await update.message.reply_text("⛔ Немає доступу.")
@@ -831,6 +948,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/problems — тільки проблеми\n"
         "/pools — список пулів\n"
         "/datasets — найбільші datasets\n"
+        "/storage — повний storage/Sia/Storj/FS статус\n"
+        "/smart — SMART/disk health\n"
         "/raw — сирі zpool/zfs дані\n"
         "/intro — AI короткий висновок по ZFS\n"
         "/ask питання — спитати Ollama\n"
@@ -906,6 +1025,8 @@ def main():
     app.add_handler(CommandHandler("problems", problems_cmd))
     app.add_handler(CommandHandler("pools", pools_cmd))
     app.add_handler(CommandHandler("datasets", datasets_cmd))
+    app.add_handler(CommandHandler("storage", storage_cmd))
+    app.add_handler(CommandHandler("smart", smart_cmd))
     app.add_handler(CommandHandler("raw", raw_cmd))
     app.add_handler(CommandHandler("intro", intro_cmd))
     app.add_handler(CommandHandler("ask", ask_cmd))

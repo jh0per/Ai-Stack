@@ -141,6 +141,7 @@ cp .env.example .env
 ```
 
 Edit `telegram-bot/.env` and set `BOT_TOKEN` and `ALLOWED_CHAT_ID`.
+Set `STORAGE_STATUS_URL` if the gateway is not on `http://127.0.0.1:3700/storage/status`.
 
 Run manually:
 
@@ -171,6 +172,13 @@ systemctl status zfs-ai-telegram.service --no-pager
 ```
 
 The current Telegram bot commands are still ZFS-oriented. The HTTP gateway status endpoint is filesystem-generic and supports non-ZFS mounts.
+
+Useful Telegram commands:
+
+- `/storage` - generic storage/Sia/Storj/filesystem status from the gateway
+- `/smart` - SMART and disk health summary from the gateway
+- `/status` - legacy ZFS-focused status
+- `/problems` - legacy ZFS-focused problems
 
 ## Optional SearXNG
 
