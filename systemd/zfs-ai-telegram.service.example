@@ -1,0 +1,15 @@
+[Unit]
+Description=Storage AI Telegram Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=storage-ai
+WorkingDirectory=/opt/ai-stack/telegram-bot
+EnvironmentFile=/opt/ai-stack/telegram-bot/.env
+ExecStart=/opt/ai-stack/telegram-bot/.venv/bin/python /opt/ai-stack/telegram-bot/bot.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

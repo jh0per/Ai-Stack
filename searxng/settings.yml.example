@@ -1,0 +1,9 @@
+# Copy to searxng/settings.yml or searxng/searxng/settings.yml for local SearXNG use.
+# Do not commit generated settings.yml because it contains an instance secret.
+
+use_default_settings: true
+
+server:
+  secret_key: "replace_with_a_random_secret"
+  bind_address: "127.0.0.1"
+  port: 8888

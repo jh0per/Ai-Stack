@@ -1,0 +1,35 @@
+# Secrets and local runtime config
+.env
+*.env
+!.env.example
+!*.env.example
+!.evn.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Runtime state
+logs/
+run/
+*.pid
+*.log
+*.state.json
+.state.json
+
+# Local Telegram bot data
+telegram-bot/.env
+telegram-bot/.state.json
+telegram-bot/.venv/
+telegram-bot/__pycache__/
+
+# Local SearXNG generated config contains an instance secret key.
+searxng/searxng/settings.yml
+
+# OS/editor noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
