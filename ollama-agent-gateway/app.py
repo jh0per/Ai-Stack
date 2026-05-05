@@ -11,6 +11,7 @@ import httpx
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 from fastmcp import Client
 from pydantic import BaseModel
 
@@ -41,6 +42,9 @@ SMART_WEB_DEFAULT = os.getenv("SMART_WEB_DEFAULT", "1").strip() == "1"
 WEB_FETCH_TOP_N = int(os.getenv("WEB_FETCH_TOP_N", "3"))
 WEB_FETCH_MAX_CHARS_PER_PAGE = int(os.getenv("WEB_FETCH_MAX_CHARS_PER_PAGE", "7000"))
 
+NODE_STORAGE_WARN_CAP = float(os.getenv("NODE_STORAGE_WARN_CAP", "95"))
+NODE_STORAGE_CRIT_CAP = float(os.getenv("NODE_STORAGE_CRIT_CAP", "0"))
+
 WEB_TRUSTED_DOMAINS = [
     item.strip().lower()
     for item in os.getenv("WEB_TRUSTED_DOMAINS", "").split(",")
@@ -51,6 +55,319 @@ DEFAULT_TIMEZONE = os.getenv("DEFAULT_TIMEZONE", "UTC").strip()
 LANGUAGE = os.getenv("LANGUAGE", "uk").strip().lower()
 
 app = FastAPI(title="Ollama Smart Web Agent Gateway")
+
+
+CHAT_HTML = """
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ollama Chat</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f5f7f8;
+      --panel: #ffffff;
+      --text: #182026;
+      --muted: #66737f;
+      --border: #d8e0e6;
+      --accent: #0f766e;
+      --accent-text: #ffffff;
+      --user: #e6f5f3;
+      --assistant: #ffffff;
+      --error: #b42318;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #111416;
+        --panel: #181d20;
+        --text: #edf2f4;
+        --muted: #a2adb7;
+        --border: #2d373d;
+        --accent: #2dd4bf;
+        --accent-text: #062320;
+        --user: #123632;
+        --assistant: #1f262a;
+        --error: #ffb4ab;
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    .app {
+      width: min(980px, 100%);
+      min-height: 100vh;
+      margin: 0 auto;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      background: var(--panel);
+      border-left: 1px solid var(--border);
+      border-right: 1px solid var(--border);
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 18px;
+      line-height: 1.2;
+      font-weight: 650;
+      letter-spacing: 0;
+    }
+
+    .status {
+      color: var(--muted);
+      font-size: 13px;
+      white-space: nowrap;
+    }
+
+    main {
+      overflow-y: auto;
+      padding: 18px;
+    }
+
+    .messages {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .message {
+      max-width: 86%;
+      padding: 12px 14px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
+    .message.user {
+      align-self: flex-end;
+      background: var(--user);
+    }
+
+    .message.assistant {
+      align-self: flex-start;
+      background: var(--assistant);
+    }
+
+    .message.error {
+      color: var(--error);
+    }
+
+    form {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 10px;
+      padding: 14px 18px 18px;
+      border-top: 1px solid var(--border);
+      background: var(--panel);
+    }
+
+    .controls {
+      grid-column: 1 / -1;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    select,
+    textarea,
+    button {
+      font: inherit;
+    }
+
+    select {
+      min-height: 36px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel);
+      color: var(--text);
+      padding: 0 10px;
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 52px;
+      max-height: 220px;
+      resize: vertical;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel);
+      color: var(--text);
+      padding: 12px;
+      line-height: 1.4;
+    }
+
+    button {
+      min-height: 52px;
+      border: 0;
+      border-radius: 8px;
+      background: var(--accent);
+      color: var(--accent-text);
+      padding: 0 18px;
+      font-weight: 650;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      cursor: wait;
+      opacity: 0.65;
+    }
+
+    @media (max-width: 640px) {
+      .app {
+        border: 0;
+      }
+
+      header {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 6px;
+      }
+
+      main {
+        padding: 12px;
+      }
+
+      .message {
+        max-width: 94%;
+      }
+
+      form {
+        grid-template-columns: 1fr;
+        padding: 12px;
+      }
+
+      button {
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>Ollama Chat</h1>
+      <div class="status" id="status">checking gateway...</div>
+    </header>
+
+    <main id="scroll">
+      <div class="messages" id="messages"></div>
+    </main>
+
+    <form id="chat-form">
+      <div class="controls">
+        <select id="endpoint" aria-label="Chat mode">
+          <option value="/agent">Agent</option>
+          <option value="/ask">Ollama only</option>
+          <option value="/agent-web">Web assisted</option>
+          <option value="/agent-zfs">ZFS/storage</option>
+        </select>
+      </div>
+      <textarea id="question" name="question" placeholder="Type a message..." autocomplete="off" required></textarea>
+      <button id="send" type="submit">Send</button>
+    </form>
+  </div>
+
+  <script>
+    const form = document.getElementById("chat-form");
+    const question = document.getElementById("question");
+    const endpoint = document.getElementById("endpoint");
+    const messages = document.getElementById("messages");
+    const scroll = document.getElementById("scroll");
+    const statusEl = document.getElementById("status");
+    const send = document.getElementById("send");
+
+    function addMessage(role, text, isError = false) {
+      const item = document.createElement("div");
+      item.className = `message ${role}${isError ? " error" : ""}`;
+      item.textContent = text;
+      messages.appendChild(item);
+      scroll.scrollTop = scroll.scrollHeight;
+      return item;
+    }
+
+    async function refreshHealth() {
+      try {
+        const response = await fetch("/health");
+        const data = await response.json();
+        statusEl.textContent = `${data.ollama_model} · ${data.status}`;
+      } catch (error) {
+        statusEl.textContent = "gateway unavailable";
+      }
+    }
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+
+      const text = question.value.trim();
+      if (!text) {
+        return;
+      }
+
+      addMessage("user", text);
+      question.value = "";
+      question.focus();
+      send.disabled = true;
+
+      const pending = addMessage("assistant", "Thinking...");
+
+      try {
+        const response = await fetch(endpoint.value, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({question: text, temperature: 0.2}),
+        });
+
+        const data = await response.json();
+        pending.textContent = data.answer || `HTTP ${response.status}`;
+        if (!response.ok) {
+          pending.classList.add("error");
+        }
+      } catch (error) {
+        pending.textContent = `Request failed: ${error}`;
+        pending.classList.add("error");
+      } finally {
+        send.disabled = false;
+        scroll.scrollTop = scroll.scrollHeight;
+      }
+    });
+
+    question.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        form.requestSubmit();
+      }
+    });
+
+    addMessage("assistant", "Ask Ollama here. Use Agent for routed local help, Ollama only for plain chat, Web assisted when SearXNG is enabled, or ZFS/storage for storage questions.");
+    refreshHealth();
+  </script>
+</body>
+</html>
+""".strip()
 
 
 class AskRequest(BaseModel):
@@ -664,10 +981,37 @@ def analyze_storage(raw: dict[str, str], checked_at: str) -> StorageStatusRespon
         mountpoint = dataset.get("mountpoint") or dataset.get("name")
         node_type = dataset.get("type", "node")
 
-        if usage is not None and usage >= 90:
-            add_issue(issues, 3, node_type, msg(f"{mountpoint} ({node_type}) заповнений на {usage:.0f}%.", f"{mountpoint} ({node_type}) is {usage:.0f}% full."), msg("Звільни місце або зменш allocation для node.", "Free space or reduce node allocation."))
-        elif usage is not None and usage >= 80:
-            add_issue(issues, 2, node_type, msg(f"{mountpoint} ({node_type}) заповнений на {usage:.0f}%.", f"{mountpoint} ({node_type}) is {usage:.0f}% full."), msg("Заплануй розвантаження dataset.", "Plan dataset rebalancing or cleanup."))
+        if usage is None:
+            continue
+
+        if NODE_STORAGE_CRIT_CAP > 0 and usage >= NODE_STORAGE_CRIT_CAP:
+            add_issue(
+                issues,
+                3,
+                node_type,
+                msg(
+                    f"{mountpoint} ({node_type}) allocation заповнений на {usage:.0f}%.",
+                    f"{mountpoint} ({node_type}) allocation is {usage:.0f}% full.",
+                ),
+                msg(
+                    "Перевір, чи це очікувана зайнятість rented storage; якщо node починає помилятися, зменш allocation або додай місце.",
+                    "Check whether this is expected rented storage usage; if the node starts failing, reduce allocation or add space.",
+                ),
+            )
+        elif usage >= NODE_STORAGE_WARN_CAP:
+            add_issue(
+                issues,
+                2,
+                node_type,
+                msg(
+                    f"{mountpoint} ({node_type}) allocation заповнений на {usage:.0f}%.",
+                    f"{mountpoint} ({node_type}) allocation is {usage:.0f}% full.",
+                ),
+                msg(
+                    "Це може бути нормально для Sia/Storj, але тримай під моніторингом logs і фактичний вільний простір.",
+                    "This can be normal for Sia/Storj, but monitor logs and actual free space.",
+                ),
+            )
 
     for drive in drives:
         if drive["severity"] >= 2:
@@ -711,6 +1055,8 @@ def analyze_storage(raw: dict[str, str], checked_at: str) -> StorageStatusRespon
         recommendations.append(msg("Після SMART попереджень зроби backup важливих даних і перевірку файлової системи.", "After SMART warnings, back up important data and run filesystem checks."))
     if any(issue["area"] == "space" for issue in issues):
         recommendations.append(msg("Для storage node тримай запас місця, бо переповнення ламає роботу нод і файлових систем.", "Keep free space for storage nodes because full filesystems break node operation."))
+    if any(issue["area"] in ("sia", "storj") for issue in issues):
+        recommendations.append(msg("Для Sia/Storj висока зайнятість allocation може бути нормальною; критичним вважай node errors, 100% filesystem або нестачу реального вільного місця.", "For Sia/Storj, high allocation usage can be normal; treat node errors, a 100% filesystem, or lack of real free space as critical."))
     if not recommendations:
         recommendations.append(msg("Критичних проблем не видно. Продовжуй регулярні filesystem checks/scrub, SMART моніторинг і перевірку node logs.", "No critical issues detected. Continue regular filesystem checks/scrub, SMART monitoring, and node log review."))
 
@@ -1028,56 +1374,380 @@ async def web_augmented_answer(question: str) -> str:
     return await smart_web_augmented_answer(question)
 
 
+def looks_like_update_question(question: str) -> bool:
+    q = question.lower()
+    words = [
+        "update",
+        "upgrade",
+        "оновлен",
+        "оновити",
+        "апгрейд",
+        "реліз",
+        "release",
+        "версія",
+        "version",
+    ]
+    return any(w in q for w in words)
+
+
+def build_storage_advisor_search_query(question: str) -> str:
+    q = question.strip()
+
+    if looks_like_update_question(q):
+        return q
+
+    return (
+        f"{q} OpenZFS zpool status scrub SMART disk health "
+        "filesystem capacity best practices documentation"
+    )
+
+
+def compact_storage_status(status: StorageStatusResponse) -> dict[str, Any]:
+    filesystems_over_80 = [
+        fs for fs in status.filesystems
+        if (fs.get("use_percent") is not None and fs["use_percent"] >= 80)
+    ]
+    node_storage_over_80 = [
+        item for item in status.node_storage
+        if (item.get("usage_percent") is not None and item["usage_percent"] >= 80)
+    ]
+
+    return {
+        "status": status.status,
+        "severity": status.severity,
+        "summary": status.summary,
+        "checked_at": status.checked_at,
+        "issues": status.issues[:25],
+        "recommendations": status.recommendations,
+        "pools": [
+            {
+                "name": pool.get("name"),
+                "health": pool.get("health"),
+                "capacity_percent": pool.get("capacity_percent"),
+                "free": pool.get("free"),
+                "fragmentation": pool.get("fragmentation"),
+            }
+            for pool in status.pools
+        ],
+        "filesystems_over_80": filesystems_over_80[:25],
+        "node_storage_over_80": node_storage_over_80[:25],
+        "drives_not_ok": [
+            drive for drive in status.drives
+            if drive.get("status") != "ok"
+        ],
+        "nodes_total": len(status.nodes),
+        "nodes_not_ok": [
+            node for node in status.nodes
+            if node.get("status") != "ok"
+        ],
+        "raw_available": status.raw_available,
+    }
+
+
+def severity_icon(severity: int) -> str:
+    if severity >= 3:
+        return "🔴"
+    if severity >= 2:
+        return "🟡"
+    return "🟢"
+
+
+def format_storage_advisor_local_report(status: StorageStatusResponse) -> str:
+    pools_online = sum(1 for pool in status.pools if pool.get("health") == "ONLINE")
+    pool_count = len(status.pools)
+    nodes_ok = sum(1 for node in status.nodes if node.get("status") == "ok")
+    pool_warnings = [
+        pool for pool in status.pools
+        if pool.get("health") != "ONLINE"
+        or (pool.get("capacity_percent") is not None and pool["capacity_percent"] >= 80)
+    ]
+    drive_warnings = [
+        drive for drive in status.drives
+        if drive.get("status") != "ok"
+    ]
+    critical_issues = [
+        issue for issue in status.issues
+        if issue.get("severity", 0) >= 3
+    ]
+    warning_issues = [
+        issue for issue in status.issues
+        if issue.get("severity") == 2
+    ]
+
+    lines = [
+        f"{severity_icon(status.severity)} Висновок: {status.summary} [local]",
+        "",
+        "Що бачу локально:",
+        f"1. ZFS pools ONLINE: {pools_online}/{pool_count}. [local]",
+        f"2. Nodes running: {nodes_ok}/{len(status.nodes)}. [local]",
+        f"3. SMART drives read: {len(status.drives)}. [local]",
+    ]
+
+    if critical_issues:
+        lines.append(f"4. Critical issues: {len(critical_issues)}. [local]")
+    elif warning_issues:
+        lines.append(f"4. Critical issues: 0, warnings: {len(warning_issues)}. [local]")
+    else:
+        lines.append("4. Явних critical/warning issues у зібраних даних немає. [local]")
+
+    if pool_warnings:
+        lines.append("")
+        lines.append("Пули, які потребують уваги:")
+        for index, pool in enumerate(pool_warnings[:10], start=1):
+            lines.append(
+                f"{index}. {pool.get('name')}: health={pool.get('health')}, "
+                f"cap={pool.get('capacity_percent')}%, free={pool.get('free')}, "
+                f"frag={pool.get('fragmentation')}. [local]"
+            )
+
+    if critical_issues or warning_issues:
+        lines.append("")
+        lines.append("Проблеми з локального аналізу:")
+        for index, issue in enumerate((critical_issues + warning_issues)[:12], start=1):
+            lines.append(
+                f"{index}. {issue.get('status')}: {issue.get('area')}: "
+                f"{issue.get('message')} Дія: {issue.get('action')} [local]"
+            )
+
+    if drive_warnings:
+        lines.append("")
+        lines.append("SMART / температура:")
+        for index, drive in enumerate(drive_warnings[:10], start=1):
+            reasons = ", ".join(drive.get("reasons") or [])
+            lines.append(
+                f"{index}. {drive.get('name')} {drive.get('model')}: "
+                f"status={drive.get('status')}, temp={drive.get('temperature_c')}C, "
+                f"reallocated={drive.get('reallocated')}, pending={drive.get('pending')}, "
+                f"uncorrectable={drive.get('uncorrectable')}; {reasons}. [local]"
+            )
+
+    return "\n".join(lines)
+
+
+def extract_web_source_refs(web_context: str) -> list[str]:
+    refs = []
+    current_index = ""
+    current_title = ""
+    current_url = ""
+
+    for line in web_context.splitlines():
+        source_match = re.match(r"SOURCE \[(\d+)\]", line.strip())
+        if source_match:
+            if current_index and current_title:
+                refs.append(f"[{current_index}] {current_title} ({current_url})")
+            current_index = source_match.group(1)
+            current_title = ""
+            current_url = ""
+            continue
+
+        if line.startswith("Title: "):
+            current_title = line.removeprefix("Title: ").strip()
+        elif line.startswith("URL: "):
+            current_url = line.removeprefix("URL: ").strip()
+
+    if current_index and current_title:
+        refs.append(f"[{current_index}] {current_title} ({current_url})")
+
+    return refs[:3]
+
+
+def format_storage_advisor_actions(
+    status: StorageStatusResponse,
+    web_context: str,
+) -> str:
+    critical_issues = [
+        issue for issue in status.issues
+        if issue.get("severity", 0) >= 3
+    ]
+    warning_issues = [
+        issue for issue in status.issues
+        if issue.get("severity") == 2
+    ]
+    pool_warnings = [
+        pool for pool in status.pools
+        if pool.get("health") != "ONLINE"
+        or (pool.get("capacity_percent") is not None and pool["capacity_percent"] >= 80)
+    ]
+    drive_warnings = [
+        drive for drive in status.drives
+        if drive.get("status") != "ok"
+    ]
+    web_refs = extract_web_source_refs(web_context)
+    web_suffix = " " + " ".join(ref.split(" ", 1)[0] for ref in web_refs) if web_refs else ""
+
+    lines = []
+
+    lines.append("Web-довідка:")
+    if web_refs:
+        for ref in web_refs:
+            lines.append(f"- {ref}")
+    else:
+        lines.append("- Web search не повернув придатних джерел; нижче висновок тільки з локальних даних.")
+
+    lines.append("")
+    lines.append("Ризики / прогалини в перевірці:")
+    if critical_issues:
+        lines.append(
+            f"1. Є {len(critical_issues)} critical проблем з вільним місцем у storage datasets; "
+            f"це ризик для роботи Sia/Storj і файлових систем.{web_suffix}"
+        )
+    else:
+        lines.append("1. Critical проблем у зібраному локальному статусі не видно. [local]")
+
+    if pool_warnings:
+        names = ", ".join(str(pool.get("name")) for pool in pool_warnings[:8])
+        lines.append(
+            f"2. ZFS pools ONLINE, але частина pools вже >=80% capacity: {names}. "
+            f"Для ZFS це зона, де треба планувати cleanup/розширення, а не чекати 90%+.{web_suffix}"
+        )
+    else:
+        lines.append("2. ZFS pools не показують capacity warning у локальному статусі. [local]")
+
+    if drive_warnings:
+        names = ", ".join(str(drive.get("name")) for drive in drive_warnings[:8])
+        lines.append(
+            f"3. Є SMART/temperature warnings на дисках: {names}; ONLINE pool не скасовує ризик деградації диска.{web_suffix}"
+        )
+    else:
+        lines.append("3. SMART/temperature warning по дисках у локальному статусі немає. [local]")
+
+    if warning_issues:
+        lines.append(
+            f"4. Додатково є {len(warning_issues)} warning issues; їх краще закрити до росту в critical. [local]"
+        )
+    else:
+        lines.append("4. Додаткових warning issues у локальному статусі немає. [local]")
+
+    lines.append("")
+    lines.append("Що перевірити зараз:")
+    lines.append("1. `zpool status -x` і повний `zpool status`: чи немає read/write/checksum errors, resilver/scrub in progress або degraded vdev.")
+    lines.append("2. `zpool list`: прибрати або розширити pools/datasets, які вже >=80%, особливо ті, де storage allocation доходить до 90-98%.")
+    lines.append("3. SMART по проблемних дисках: перевірити, чи ростуть reallocated/pending/uncorrectable, і знизити температуру NVMe.")
+    lines.append("4. Для Sia/Storj: зменшити allocation або перенести дані з datasets, які вже на 90%+, потім перевірити logs контейнерів.")
+
+    lines.append("")
+    lines.append("Моя порада:")
+    if status.severity >= 3:
+        lines.append(
+            "Не називав би стан файлової системи повністю нормальним: ZFS pools онлайн, але статус storage загалом critical через заповнення datasets. "
+            "Спершу звільни/перерозподіли місце на critical Sia/Storj mountpoints, потім займайся warning pools і SMART/NVMe температурою."
+        )
+    elif status.severity == 2:
+        lines.append(
+            "Стан робочий, але не ідеальний: critical немає, warning треба закрити планово. "
+            "Пріоритет: capacity запас, SMART trend, регулярний scrub."
+        )
+    else:
+        lines.append(
+            "За зібраними даними стан виглядає нормальним. Продовжуй регулярний scrub, SMART моніторинг і контроль вільного місця."
+        )
+
+    return "\n".join(lines)
+
+
+async def collect_zfs_health_context() -> str:
+    wanted_tools = [
+        "zpool_list",
+        "zpool_status_x",
+        "zpool_status",
+    ]
+
+    parts = []
+
+    for tool_name in wanted_tools:
+        if tool_name not in MCP_ALLOWED_TOOLS:
+            continue
+
+        result = await mcp_call_tool(tool_name, {})
+
+        parts.append("=" * 80)
+        parts.append(tool_name)
+        parts.append("=" * 80)
+        parts.append(result[:12000])
+        parts.append("")
+
+    if not parts:
+        return "No ZFS health MCP tools available."
+
+    return "\n".join(parts)
+
+
 async def web_zfs_advisor_answer(question: str) -> str:
-    web_context = await build_smart_web_context(question)
-    zfs_context = await collect_zfs_context()
+    web_query = build_storage_advisor_search_query(question)
+    web_context = await build_smart_web_context(web_query)
+    storage_status = await storage_status_data()
+    local_report = format_storage_advisor_local_report(storage_status)
+    update_mode = looks_like_update_question(question)
+
+    if not update_mode:
+        actions = format_storage_advisor_actions(storage_status, web_context)
+        return f"{local_report}\n\n{actions}".strip()
+
+    zfs_context = await collect_zfs_health_context()
+    storage_status_json = json.dumps(
+        compact_storage_status(storage_status),
+        ensure_ascii=False,
+        indent=2,
+    )
+    update_instruction = "Користувач питає про оновлення/версії: оціни користь, ризики і що перевірити перед оновленням."
 
     prompt = f"""
 Питання користувача:
 {question}
 
+WEB SEARCH QUERY USED:
+{web_query}
+
 WEB CONTEXT:
-Це результати пошуку + текст відкритих сторінок:
+Це результати пошуку + текст відкритих сторінок. Використовуй їх як інструкції/критерії оцінки, а не як заміну локальним даним:
 
 {web_context}
 
+LOCAL STORAGE SUMMARY:
+Це вже розібраний локальний стан storage/filesystems/nodes/drives:
+
+{storage_status_json}
+
+LOCAL FACTS THAT MUST BE PRESERVED EXACTLY:
+{local_report}
+
 LOCAL ZFS CONTEXT:
-Це поточний стан ZFS/дисків з MCP tools:
+Це сирий поточний стан ZFS/дисків з MCP tools:
 
 {zfs_context}
 
-Ти маєш відповісти НЕ просто що змінилось у релізі, а що це означає для МОГО ZFS/fileserver.
+Ти професійний storage/SRE advisor для локального fileserver.
+Спочатку розбери конкретне питання користувача, потім застосуй web context як довідку, і тільки після цього дай висновок по локальних даних.
+{update_instruction}
 
 Завдання:
 - {language_instruction()}
-- Спирайся на web context і local ZFS context.
-- Не вигадуй фактів, яких немає в джерелах або локальному контексті.
-- Якщо в web context є тільки версія пакета, прямо скажи, що деталей мало.
-- Дай 5–7 практичних пунктів.
-- Окремо напиши: що корисно, що ризиково, що перевірити перед оновленням.
-- Якщо бачиш, що всі пули ONLINE, врахуй це.
-- Не радь оновлювати production/fileserver без backup/snapshot/scrub/check.
+- Головним джерелом для стану МОГО сервера є LOCAL STORAGE SUMMARY і LOCAL ZFS CONTEXT.
+- WEB CONTEXT використовуй для правил оцінки: як читати zpool status, scrub/resilver/errors, SMART, заповнення filesystem/pool.
+- Не вигадуй фактів, яких немає в web sources або локальному контексті.
+- Якщо web context порожній або слабкий, прямо скажи і все одно дай локальний висновок з обмеженнями.
+- Якщо локальних даних для частини питання немає, напиши що саме не перевірено.
+- Якщо всі пули ONLINE, це добре, але не називай це повною гарантією без SMART/scrub/error counters.
+- Для фактів з локального стану посилайся як [local].
 - Для фактів з вебу став номер джерела: [1], [2], [3].
+- Не зводь відповідь до загальних backup-порад; спершу назви конкретні знайдені стани, проблеми і ризики.
+- Не додавай нові локальні факти поза LOCAL FACTS THAT MUST BE PRESERVED EXACTLY.
+- Не повторюй секції "Висновок", "Що бачу локально", "Пули, які потребують уваги", "Проблеми з локального аналізу", "SMART / температура".
 
 Формат:
 
-🟢/🟡/🔴 Висновок: ...
-
-Що нового для ZFS:
+Ризики / прогалини в перевірці:
 1. ...
 
-Що це значить для твого сервера:
-1. ...
-2. ...
-
-Перед оновленням перевір:
+Що перевірити зараз:
 1. ...
 
 Моя порада:
 ...
 """.strip()
 
-    return await plain_ollama_answer(prompt, temperature=0.1)
+    advice = await plain_ollama_answer(prompt, temperature=0.1)
+    return f"{local_report}\n\n{advice}".strip()
 
 
 
@@ -1278,6 +1948,11 @@ async def routed_agent_answer(question: str, prefer_web: bool = False) -> str:
         return await smart_web_augmented_answer(question)
 
     return await plain_ollama_answer(question, temperature=0.2)
+
+
+@app.get("/", response_class=HTMLResponse)
+async def chat_page():
+    return HTMLResponse(CHAT_HTML)
 
 
 @app.get("/health")

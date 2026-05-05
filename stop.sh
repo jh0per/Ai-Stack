@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-cd "$HOME/ai-stack"
+cd "$(dirname "$0")"
 
 if [ -f run/ollama-agent-gateway.pid ]; then
   PID=$(cat run/ollama-agent-gateway.pid)

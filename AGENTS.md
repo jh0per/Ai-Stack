@@ -25,9 +25,11 @@ Ignored local files include:
 - `__pycache__/`
 - `searxng/searxng/settings.yml`
 
-Use `.env.example`, `.evn.example`, and `telegram-bot/.env.example` for public configuration examples.
+Use `.env.example` and `telegram-bot/.env.example` for public configuration examples.
 
 If you ever see a real Telegram token, API key, local password, private IP inventory, or machine-specific path in a publishable file, remove it and tell the user. Do not repeat the secret in your final answer.
+
+Keep LAN bind addresses and deployment-specific URLs only in local `.env` files. Public docs and examples should use loopback or placeholders.
 
 ## Storage Support
 
@@ -81,6 +83,12 @@ curl http://127.0.0.1:3700/mcp/tools
 curl http://127.0.0.1:3700/storage/status
 ```
 
+Check browser chat after gateway UI changes:
+
+```bash
+curl http://127.0.0.1:3700/
+```
+
 Before publishing, dry-run staged files:
 
 ```bash
@@ -105,3 +113,5 @@ Confirm no ignored runtime files or secrets are included.
 `SMARTCTL_USE_SUDO=1` uses `sudo -n smartctl`. It only works with passwordless sudo for smartctl. If not available, SMART details may be `unknown`; do not treat that as proof disks are healthy.
 
 The Telegram bot still contains legacy ZFS-oriented commands. The HTTP gateway storage status is the generic filesystem-aware path.
+
+Scheduled Telegram storage alerts should stay low-noise: send only critical gateway issues by default, suppress unchanged repeats for the configured cooldown, and keep capacity/fullness detail behind the manual `/space` command.

@@ -80,6 +80,8 @@ Important options:
 - `LANGUAGE=uk` or `LANGUAGE=en`
 - `OLLAMA_URL=http://127.0.0.1:11434/api/chat`
 - `OLLAMA_MODEL=ua-tech`
+- `GATEWAY_HOST=127.0.0.1` for local-only browser access; use `0.0.0.0` only on a trusted network
+- `GATEWAY_PORT=3700`
 - `SMARTCTL_USE_SUDO=0` by default; set to `1` only if passwordless sudo is configured for `smartctl`
 - `FS_ALLOWED_ROOTS=/mnt` or another safe comma-separated path list
 - `WEB_SEARCH_ENABLED=0` unless you run local SearXNG
@@ -96,6 +98,16 @@ Check status:
 curl http://127.0.0.1:3700/health
 curl http://127.0.0.1:3700/storage/status
 ```
+
+Open the browser chat:
+
+```text
+http://127.0.0.1:3700/
+```
+
+Set `GATEWAY_HOST` in your local `.env` to a trusted LAN address if you need access from another device. Do not commit machine-specific addresses.
+
+The chat page can use the routed agent, plain Ollama, web-assisted answers, or ZFS/storage mode.
 
 Stop services:
 
@@ -143,6 +155,8 @@ cp .env.example .env
 Edit `telegram-bot/.env` and set `BOT_TOKEN` and `ALLOWED_CHAT_ID`.
 Set `STORAGE_STATUS_URL` if the gateway is not on `http://127.0.0.1:3700/storage/status`.
 
+Scheduled Telegram alerts use the generic gateway status and only send critical issues by default. Capacity/fullness warnings are available on demand with `/space` so routine high Sia/Storj allocation does not spam alerts. If the critical alert signature is unchanged, repeats are suppressed for `ALERT_UNCHANGED_COOLDOWN_HOURS` hours.
+
 Run manually:
 
 ```bash
@@ -177,6 +191,7 @@ Useful Telegram commands:
 
 - `/status` - main generic storage/Sia/Storj/filesystem status from the gateway
 - `/problems` - only storage problems from the gateway
+- `/space` - pool, filesystem, and node allocation fullness from the gateway
 - `/smart` - SMART and disk health summary from the gateway
 - `/storage` - alias-style explicit storage status command
 - `/health` - alias for `/status`

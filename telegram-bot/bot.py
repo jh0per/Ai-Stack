@@ -30,6 +30,7 @@ TIMEZONE = os.getenv("TIMEZONE", "UTC").strip()
 ALERT_ENABLED = os.getenv("ALERT_ENABLED", "1").strip() == "1"
 ALERT_INTERVAL_MINUTES = int(os.getenv("ALERT_INTERVAL_MINUTES", "60"))
 ALERT_ONLY_ON_CHANGE = os.getenv("ALERT_ONLY_ON_CHANGE", "1").strip() == "1"
+ALERT_UNCHANGED_COOLDOWN_HOURS = float(os.getenv("ALERT_UNCHANGED_COOLDOWN_HOURS", "6"))
 
 DAILY_SUMMARY_ENABLED = os.getenv("DAILY_SUMMARY_ENABLED", "1").strip() == "1"
 DAILY_TIME = os.getenv("DAILY_TIME", "09:00").strip()
@@ -362,6 +363,76 @@ def problem_signature_from_data(data: dict) -> str:
 
     payload = json.dumps(stable, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def storage_problem_signature(data: dict) -> str:
+    stable = {
+        "status": data.get("status"),
+        "issues": [
+            {
+                "severity": issue.get("severity"),
+                "status": issue.get("status"),
+                "area": issue.get("area"),
+                "message": issue.get("message"),
+                "action": issue.get("action"),
+            }
+            for issue in data.get("issues", [])
+        ],
+    }
+
+    payload = json.dumps(stable, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def critical_storage_issues(data: dict) -> list[dict]:
+    return [
+        issue for issue in data.get("issues", [])
+        if int(issue.get("severity") or 0) >= 3
+    ]
+
+
+def critical_storage_signature(data: dict) -> str:
+    stable = {
+        "critical_issues": [
+            {
+                "severity": issue.get("severity"),
+                "status": issue.get("status"),
+                "area": issue.get("area"),
+                "message": issue.get("message"),
+                "action": issue.get("action"),
+            }
+            for issue in critical_storage_issues(data)
+        ],
+    }
+
+    payload = json.dumps(stable, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def parse_state_time(value: str):
+    if not value:
+        return None
+
+    try:
+        timestamp = value.rsplit(" ", 1)[0]
+        return datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S").replace(tzinfo=ZoneInfo(TIMEZONE))
+    except Exception:
+        return None
+
+
+def unchanged_alert_in_cooldown(state: dict, signature: str) -> bool:
+    if not ALERT_ONLY_ON_CHANGE:
+        return False
+
+    if state.get("last_storage_problem_signature") != signature:
+        return False
+
+    last_sent = parse_state_time(state.get("last_storage_problem_time", ""))
+    if not last_sent:
+        return False
+
+    elapsed = datetime.now(ZoneInfo(TIMEZONE)) - last_sent
+    return elapsed < timedelta(hours=ALERT_UNCHANGED_COOLDOWN_HOURS)
 
 
 def build_status_report(data: dict | None = None) -> str:
@@ -784,6 +855,10 @@ def build_smart_report() -> str:
 
 def build_storage_problems_report() -> str:
     data = fetch_storage_status()
+    return build_storage_problems_report_from_data(data)
+
+
+def build_storage_problems_report_from_data(data: dict) -> str:
     issues = data.get("issues", [])
 
     lines = [
@@ -808,6 +883,84 @@ def build_storage_problems_report() -> str:
 
     if len(issues) > 30:
         lines.append(f"...ще {len(issues) - 30} проблем")
+
+    return "\n".join(lines).strip()
+
+
+def build_critical_storage_report_from_data(data: dict) -> str:
+    issues = critical_storage_issues(data)
+
+    lines = [
+        "🚨 Critical storage alerts",
+        f"Стан: {data.get('status', 'unknown').upper()}",
+        f"Час: {data.get('checked_at', '-')}",
+        "",
+    ]
+
+    if not issues:
+        lines.append("Critical проблем не знайдено.")
+        return "\n".join(lines).strip()
+
+    for issue in issues[:20]:
+        action = issue.get("action")
+        lines.append(
+            f"- {issue.get('area', '-')}: {issue.get('message', '-')}"
+        )
+        if action:
+            lines.append(f"  Дія: {action}")
+
+    if len(issues) > 20:
+        lines.append(f"...ще {len(issues) - 20} critical проблем")
+
+    return "\n".join(lines).strip()
+
+
+def build_space_report() -> str:
+    data = fetch_storage_status()
+    pools = [
+        pool for pool in data.get("pools", [])
+        if pool.get("capacity_percent") is not None and pool["capacity_percent"] >= WARN_POOL_CAP
+    ]
+    filesystems = [
+        fs for fs in data.get("filesystems", [])
+        if fs.get("use_percent") is not None and fs["use_percent"] >= 80
+    ]
+    node_storage = [
+        item for item in data.get("node_storage", [])
+        if item.get("usage_percent") is not None and item["usage_percent"] >= 80
+    ]
+
+    lines = [
+        "📦 Storage fullness",
+        f"Час: {data.get('checked_at', '-')}",
+        "",
+    ]
+
+    if pools:
+        lines.append("Pools >= warn threshold:")
+        for pool in pools[:20]:
+            lines.append(
+                f"- {pool.get('name')}: {pool.get('capacity_percent')}% "
+                f"used, free={pool.get('free')}, health={pool.get('health')}"
+            )
+    else:
+        lines.append("Pools >= warn threshold не знайдено.")
+
+    if filesystems:
+        lines.extend(["", "Filesystems >=80%:"])
+        for fs in filesystems[:30]:
+            lines.append(
+                f"- {fs.get('mountpoint')}: {fs.get('use_percent')}% "
+                f"used, free={fs.get('available')}, fs={fs.get('filesystem')}"
+            )
+
+    if node_storage:
+        lines.extend(["", "Node allocations >=80%:"])
+        for item in node_storage[:30]:
+            lines.append(
+                f"- {item.get('mountpoint') or item.get('name')}: "
+                f"{item.get('usage_percent')}% ({item.get('type', 'node')})"
+            )
 
     return "\n".join(lines).strip()
 
@@ -933,6 +1086,20 @@ async def smart_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_long_message(context, update.effective_chat.id, report)
 
 
+async def space_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        await update.message.reply_text("⛔ Немає доступу.")
+        return
+
+    await update.message.reply_text("Збираю fullness по pools/filesystems/nodes...")
+    try:
+        report = await asyncio.to_thread(build_space_report)
+    except Exception as e:
+        report = f"⚠️ storage fullness error: {e}"
+
+    await send_long_message(context, update.effective_chat.id, report)
+
+
 async def intro_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update):
         await update.message.reply_text("⛔ Немає доступу.")
@@ -998,6 +1165,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Команди:\n\n"
         "/status — головний storage/Sia/Storj/FS статус\n"
         "/problems — тільки storage проблеми\n"
+        "/space — переповненість pools/filesystems/nodes\n"
         "/smart — SMART/disk health\n"
         "/ask питання — спитати Ollama\n"
         "\n"
@@ -1020,40 +1188,65 @@ async def alert_job(context: ContextTypes.DEFAULT_TYPE):
     if not ALLOWED_CHAT_ID:
         return
 
-    data = await asyncio.to_thread(analyze_zfs)
-    problems: list[Problem] = data["problems"]
+    try:
+        data = await asyncio.to_thread(fetch_storage_status)
+    except Exception as e:
+        state = load_state()
+        error_sig = hashlib.sha256(f"storage-status-error:{e}".encode("utf-8")).hexdigest()
+
+        if unchanged_alert_in_cooldown(state, error_sig):
+            return
+
+        state["last_storage_problem_signature"] = error_sig
+        state["last_storage_problem_time"] = now_text()
+        save_state(state)
+
+        await send_long_message(
+            context,
+            ALLOWED_CHAT_ID,
+            (
+                "🚨 Storage monitor не зміг зібрати статус\n\n"
+                f"URL: {STORAGE_STATUS_URL}\n"
+                f"🕒 {now_text()}\n"
+                f"Помилка: {e}"
+            ),
+        )
+        return
+
+    issues = critical_storage_issues(data)
 
     state = load_state()
 
-    if not problems:
-        if state.get("last_problem_signature"):
-            state["last_problem_signature"] = ""
-            state["last_problem_time"] = ""
+    if not issues:
+        if state.get("last_storage_problem_signature"):
+            state["last_storage_problem_signature"] = ""
+            state["last_storage_problem_time"] = ""
             save_state(state)
 
             ok_text = (
-                "✅ ZFS знову без проблем\n\n"
-                f"🖥 Host: {data['hostname']}\n"
-                f"🕒 {data['time']}"
+                "✅ Critical storage alerts cleared\n\n"
+                f"Стан: {data.get('status', 'unknown').upper()}\n"
+                f"Час: {data.get('checked_at', now_text())}\n"
+                f"{data.get('summary', '')}"
             )
 
             await send_long_message(context, ALLOWED_CHAT_ID, ok_text)
 
         return
 
-    sig = problem_signature_from_data(data)
+    sig = critical_storage_signature(data)
 
-    if ALERT_ONLY_ON_CHANGE and state.get("last_problem_signature") == sig:
+    if unchanged_alert_in_cooldown(state, sig):
         return
 
-    state["last_problem_signature"] = sig
-    state["last_problem_time"] = now_text()
+    state["last_storage_problem_signature"] = sig
+    state["last_storage_problem_time"] = now_text()
     save_state(state)
 
-    report = build_problems_report(data)
+    report = build_critical_storage_report_from_data(data)
 
     alert_text = (
-        "🚨 Чувак, є проблема з ZFS\n\n"
+        "🚨 Є critical проблема зі storage/filesystem/nodes\n\n"
         f"{report}"
     )
 
@@ -1064,7 +1257,11 @@ async def daily_summary_job(context: ContextTypes.DEFAULT_TYPE):
     if not ALLOWED_CHAT_ID:
         return
 
-    report = await asyncio.to_thread(build_status_report)
+    try:
+        report = await asyncio.to_thread(build_storage_report)
+    except Exception as e:
+        report = f"⚠️ storage daily summary error: {e}"
+
     await send_long_message(context, ALLOWED_CHAT_ID, report)
 
 
@@ -1085,6 +1282,7 @@ def main():
     app.add_handler(CommandHandler("storage", storage_cmd))
     app.add_handler(CommandHandler("smart", smart_cmd))
     app.add_handler(CommandHandler("disks", smart_cmd))
+    app.add_handler(CommandHandler("space", space_cmd))
     app.add_handler(CommandHandler("raw", raw_cmd))
     app.add_handler(CommandHandler("intro", intro_cmd))
     app.add_handler(CommandHandler("ask", ask_cmd))
@@ -1095,7 +1293,7 @@ def main():
             alert_job,
             interval=timedelta(minutes=ALERT_INTERVAL_MINUTES),
             first=30,
-            name="zfs_problem_alerts",
+            name="storage_problem_alerts",
         )
         print(f"Problem alerts enabled every {ALERT_INTERVAL_MINUTES} minutes")
     else:
@@ -1111,13 +1309,13 @@ def main():
                 minute=int(minute),
                 tzinfo=ZoneInfo(TIMEZONE),
             ),
-            name="daily_zfs_summary",
+            name="daily_storage_summary",
         )
         print(f"Daily summary enabled at {DAILY_TIME} {TIMEZONE}")
     else:
         print("Daily summary disabled")
 
-    print("ZFS Telegram bot started")
+    print("Storage Telegram bot started")
     app.run_polling()
 
 
