@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -10,6 +11,14 @@ SERVER_PATH = ROOT_DIR / "mcp-storage-server" / "server.py"
 HEADERS = ["DISK", "DEV", "TEMP", "RELO", "PEND", "UNCOR", "HOURS", "SNAPSHOT"]
 WIDTHS = [48, 12, 4, 5, 5, 5, 8, 19]
 RIGHT_ALIGNED = {2, 3, 4, 5, 6}
+USE_COLOR = sys.stdout.isatty() and not os.getenv("NO_COLOR")
+RESET = "\033[0m" if USE_COLOR else ""
+BOLD = "\033[1m" if USE_COLOR else ""
+DIM = "\033[2m" if USE_COLOR else ""
+CYAN = "\033[38;5;45m" if USE_COLOR else ""
+GREEN = "\033[38;5;42m" if USE_COLOR else ""
+YELLOW = "\033[38;5;220m" if USE_COLOR else ""
+RED = "\033[38;5;196m" if USE_COLOR else ""
 
 
 def load_storage_server():
@@ -32,16 +41,46 @@ def fit(value: str, width: int) -> str:
 
 
 def border(left: str, middle: str, right: str) -> str:
-    return left + middle.join("─" * (width + 2) for width in WIDTHS) + right
+    line = left + middle.join("─" * (width + 2) for width in WIDTHS) + right
+    return f"{DIM}{line}{RESET}"
 
 
-def table_row(values: list[str]) -> str:
+def metric_color(value: str, temperature: bool = False) -> str:
+    try:
+        number = int(value)
+    except ValueError:
+        return DIM
+
+    if temperature:
+        if number > 51:
+            return RED
+        if number > 41:
+            return YELLOW
+        return GREEN
+
+    if number > 5:
+        return RED
+    if number >= 1:
+        return YELLOW
+    return GREEN
+
+
+def table_row(values: list[str], drive: dict | None = None) -> str:
     output = []
     for index, value in enumerate(values):
         value = fit(value, WIDTHS[index])
         value = value.rjust(WIDTHS[index]) if index in RIGHT_ALIGNED else value.ljust(WIDTHS[index])
-        output.append(f" {value} ")
-    return "│" + "│".join(output) + "│"
+        color = ""
+        if drive is not None:
+            if index == 2:
+                color = metric_color(cell(drive.get("temperature_c")), temperature=True)
+            elif index in (3, 4, 5):
+                keys = {3: "reallocated", 4: "pending", 5: "uncorrectable"}
+                color = metric_color(cell(drive.get(keys[index])))
+            elif not drive.get("connected"):
+                color = DIM
+        output.append(f" {color}{value}{RESET if color else ''} ")
+    return f"{DIM}│{RESET}" + f"{DIM}│{RESET}".join(output) + f"{DIM}│{RESET}"
 
 
 def render() -> str:
@@ -71,15 +110,18 @@ def render() -> str:
     historical_warnings = sum(1 for drive in historical if int(drive.get("severity") or 0) >= 2)
 
     lines = [
-        "SMART Disk Health  smartd snapshots",
+        f"{BOLD}{CYAN}SMART Disk Health{RESET}  {DIM}smartd snapshots{RESET}",
         border("╭", "┬", "╮"),
-        table_row(HEADERS),
+        f"{BOLD}{table_row(HEADERS)}{RESET}",
         border("├", "┼", "┤"),
-        *(table_row(row) for row in rows),
+        *(table_row(row, drive) for row, drive in zip(rows, drives)),
         border("╰", "┴", "╯"),
         (
-            f"{len(connected)} connected · {len(historical)} historical · "
-            f"{active_warnings} active warnings · {historical_warnings} historical warnings"
+            f"{GREEN}●{RESET} {len(connected)} connected · "
+            f"{DIM}○ {len(historical)} historical{RESET} · "
+            f"{RED if active_warnings else GREEN}{'▲' if active_warnings else '✓'}{RESET} "
+            f"{active_warnings} active warnings · "
+            f"{YELLOW if historical_warnings else DIM}{historical_warnings} historical warnings{RESET}"
         ),
     ]
     return "\n".join(lines)
