@@ -1221,9 +1221,9 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Немає доступу. Спочатку /start і додай chat_id в .env.")
         return
 
-    await update.message.reply_text("Збираю storage status...")
+    await update.message.reply_text("Перевіряю storage проблеми...")
     try:
-        report = await asyncio.to_thread(build_storage_report)
+        report = await asyncio.to_thread(build_storage_problems_report)
     except Exception as e:
         report = f"⚠️ storage status error: {e}"
 
@@ -1399,8 +1399,9 @@ async def askzfs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "Команди:\n\n"
-        "/status — головний storage/Sia/Storj/FS статус\n"
-        "/problems — тільки storage проблеми\n"
+        "/status — тільки storage проблеми\n"
+        "/problems — alias для /status\n"
+        "/storage — повний storage/Sia/Storj/FS статус\n"
         "/space — переповненість pools/filesystems/nodes\n"
         "/smart — SMART/disk health\n"
         "/nas — NAS mount status для backup\n"

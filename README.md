@@ -195,7 +195,7 @@ Set `STORAGE_STATUS_URL` if the gateway is not on `http://127.0.0.1:3700/storage
 
 Scheduled Telegram alerts use the generic gateway status and only send critical issues by default. Capacity/fullness warnings are available on demand with `/space` so routine high Sia/Storj allocation does not spam alerts. If the critical alert signature is unchanged, repeats are suppressed for `ALERT_UNCHANGED_COOLDOWN_HOURS` hours.
 
-The `/status` and daily summary messages include all migrated `zfs-table` filesystem/volume rows and passive `smart-table` disk snapshots. `/smart` shows those snapshots plus live NVMe health, while `/space` includes the full ZFS dataset table. When smartd logs are available, the gateway does not query spinning disks; it only reads the logs and checks non-spinning NVMe devices. Full live `smartctl` scanning remains a fallback for hosts without logs.
+The `/status` command reports only detected problems; `/storage` and the daily summary retain the complete gateway status. The daily summary includes all migrated `zfs-table` filesystem/volume rows and passive `smart-table` disk snapshots. `/smart` shows those snapshots plus live NVMe health, while `/space` includes the full ZFS dataset table. When smartd logs are available, the gateway does not query spinning disks; it only reads the logs and checks non-spinning NVMe devices. Full live `smartctl` scanning remains a fallback for hosts without logs.
 
 NAS backup mount monitoring is enabled by default. Set `NAS_MOUNT_PATHS=/mnt/nas-backup` (or your local mountpoint) and `NAS_EXPECTED_FSTYPES=cifs,nfs,nfs4,fuse.sshfs` in `telegram-bot/.env`. The bot sends an alert when the NAS mount disappears and a recovery message when it returns.
 
@@ -231,12 +231,12 @@ The current Telegram bot commands are still ZFS-oriented. The HTTP gateway statu
 
 Useful Telegram commands:
 
-- `/status` - main generic storage/Sia/Storj/filesystem status from the gateway
-- `/problems` - only storage problems from the gateway
+- `/status` - only detected storage problems from the gateway
+- `/problems` - explicit alias for `/status`
 - `/space` - pool, filesystem, and node allocation fullness from the gateway
 - `/smart` - SMART and disk health summary from the gateway
 - `/nas` - NAS mount status used by backup protection
-- `/storage` - alias-style explicit storage status command
+- `/storage` - complete storage/Sia/Storj/filesystem status from the gateway
 - `/health` - alias for `/status`
 - `/disks` - alias for `/smart`
 - `/zfs` - legacy ZFS-focused status
