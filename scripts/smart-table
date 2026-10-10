@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_path=$(readlink -f "${BASH_SOURCE[0]}")
+repo_dir=$(cd "$(dirname "$script_path")/.." && pwd)
+python_bin="$repo_dir/.venv/bin/python"
+
+if [[ ! -x "$python_bin" ]]; then
+    python_bin=$(command -v python3)
+fi
+
+exec "$python_bin" "$repo_dir/scripts/storage_tables.py" smart

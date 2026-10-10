@@ -100,6 +100,19 @@ curl http://127.0.0.1:3700/health
 curl http://127.0.0.1:3700/storage/status
 ```
 
+Local terminal tables use the same collectors as the MCP API:
+
+```bash
+./scripts/smart-table
+./scripts/zfs-table
+```
+
+To make a command available system-wide, symlink it from the checked-out repository, for example:
+
+```bash
+sudo ln -s "$(pwd)/scripts/zfs-table" /usr/local/sbin/zfs-table
+```
+
 Open the browser chat:
 
 ```text
