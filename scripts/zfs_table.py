@@ -9,9 +9,9 @@ from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 SERVER_PATH = ROOT_DIR / "mcp-storage-server" / "server.py"
-HEADERS = ["TYPE", "DATASET", "USED", "FREE", "USAGE", "MOUNTPOINT"]
-WIDTH_CAPS = [10, 42, 8, 8, 17, 42]
-RIGHT_ALIGNED = {2, 3}
+HEADERS = ["DATASET", "USED", "FREE", "USAGE", "MOUNTPOINT"]
+WIDTH_CAPS = [42, 8, 8, 17, 42]
+RIGHT_ALIGNED = {1, 2}
 signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 USE_COLOR = sys.stdout.isatty() and not os.getenv("NO_COLOR")
 RESET = "\033[0m" if USE_COLOR else ""
@@ -105,7 +105,37 @@ def tree_rows(datasets: list[dict]) -> list[tuple[dict, str]]:
     return output
 
 
-def render_table(rows: list[list[str]], percentages: list[float]) -> str:
+def node_color(item: dict) -> str:
+    if item.get("is_root"):
+        return GREEN
+    if item.get("tag") == "storj":
+        return CYAN
+    if item.get("tag") == "sia":
+        return MAGENTA
+    if item.get("type") == "volume":
+        return YELLOW
+    return BLUE
+
+
+def colored_tree(value: str, width: int, item: dict) -> str:
+    padded = value.ljust(width)
+    color = node_color(item)
+    if item.get("is_root"):
+        return f"{BOLD}{color}{padded}{RESET}"
+
+    positions = [value.rfind("├── "), value.rfind("└── ")]
+    split_at = max(positions)
+    if split_at < 0:
+        return f"{color}{padded}{RESET}"
+
+    name_at = split_at + 4
+    prefix = value[:name_at]
+    name = value[name_at:]
+    padding = " " * max(0, width - len(value))
+    return f"{DIM}{prefix}{RESET}{color}{name}{RESET}{padding}"
+
+
+def render_table(rows: list[list[str]], percentages: list[float], items: list[dict]) -> str:
     widths = []
     for index, header in enumerate(HEADERS):
         widest = max([len(header), *(len(row[index]) for row in rows)])
@@ -115,29 +145,20 @@ def render_table(rows: list[list[str]], percentages: list[float]) -> str:
         line = left + middle.join("─" * (width + 2) for width in widths) + right
         return f"{DIM}{line}{RESET}"
 
-    def table_row(values: list[str], row_type: str = "", percent: float | None = None) -> str:
+    def table_row(values: list[str], item: dict | None = None, percent: float | None = None) -> str:
         output = []
         for index, value in enumerate(values):
             value = fit(value, widths[index])
             value = value.rjust(widths[index]) if index in RIGHT_ALIGNED else value.ljust(widths[index])
             color = ""
-            if index == 0:
-                if row_type == "storj":
-                    color = CYAN
-                elif row_type == "sia":
-                    color = MAGENTA
-                elif row_type == "filesystem":
-                    color = BLUE
-                elif row_type == "volume":
-                    color = YELLOW
-                elif row_type == "pool":
-                    color = GREEN
-            elif index == 2 and percent is not None:
+            if index == 1 and percent is not None:
                 color = RED if percent >= 90 else YELLOW
-            elif index == 3 and percent is not None:
+            elif index == 2 and percent is not None:
                 color = GREEN
 
-            if index == 4 and percent is not None:
+            if index == 0 and item is not None:
+                value = colored_tree(value.rstrip(), widths[index], item)
+            elif index == 3 and percent is not None:
                 value = colored_progress(percent) if USE_COLOR else progress_text(percent)
                 value = value.ljust(widths[index])
 
@@ -148,7 +169,7 @@ def render_table(rows: list[list[str]], percentages: list[float]) -> str:
         border("╭", "┬", "╮"),
         f"{BOLD}{table_row(HEADERS)}{RESET}",
         border("├", "┼", "┤"),
-        *(table_row(row, row[0].lower(), percent) for row, percent in zip(rows, percentages)),
+        *(table_row(row, item, percent) for row, percent, item in zip(rows, percentages, items)),
         border("╰", "┴", "╯"),
     ])
 
@@ -167,7 +188,6 @@ def render() -> str:
     ]
     rows = [
         [
-            cell(item.get("type")).upper(),
             label,
             human_bytes(item.get("used_bytes")),
             human_bytes(item.get("available_bytes")),
@@ -177,16 +197,15 @@ def render() -> str:
         for (item, label), percent in zip(ordered, percentages)
     ]
     colored_summary = (
-        f"{GREEN}●{RESET} {len(datasets)} datasets · "
-        f"{GREEN}POOLS{RESET} {data.get('pool_count', 0)} · "
-        f"{BLUE}DATASETS{RESET} {data.get('dataset_count', 0)} · "
-        f"{YELLOW}VOLUME{RESET} {data.get('volume_count', 0)} · "
-        f"{CYAN}STORJ tagged{RESET} {data.get('storj_count', 0)} · "
-        f"{MAGENTA}SIA tagged{RESET} {data.get('sia_count', 0)}"
+        f"{GREEN}●{RESET} {len(datasets)} entries · "
+        f"{GREEN}ROOTS{RESET} {data.get('root_count', 0)} · "
+        f"{BLUE}CHILDREN{RESET} {data.get('dataset_count', 0)} · "
+        f"{CYAN}STORJ{RESET} {data.get('storj_count', 0)} · "
+        f"{MAGENTA}SIA{RESET} {data.get('sia_count', 0)}"
     )
     return "\n".join([
         f"{BOLD}{CYAN}ZFS Storage Datasets{RESET}  {DIM}all filesystems and volumes{RESET}",
-        render_table(rows, percentages),
+        render_table(rows, percentages, [item for item, _ in ordered]),
         colored_summary,
     ])
 

@@ -968,12 +968,12 @@ def zfs_table_lines(data: dict) -> list[str]:
     if not datasets:
         return ["ZFS Sia/Storj datasets недоступні."]
 
-    storj_count = sum(1 for item in datasets if item.get("type") == "storj")
-    sia_count = sum(1 for item in datasets if item.get("type") == "sia")
-    other_count = len(datasets) - storj_count - sia_count
+    storj_count = sum(1 for item in datasets if item.get("tag") == "storj")
+    sia_count = sum(1 for item in datasets if item.get("tag") == "sia")
+    root_count = sum(1 for item in datasets if item.get("is_root"))
     lines = [
-        f"ZFS datasets: {len(datasets)} total, "
-        f"Storj {storj_count}, Sia {sia_count}, other {other_count}"
+        f"ZFS tree: {len(datasets)} entries, {root_count} roots, "
+        f"{len(datasets) - root_count} children, Storj {storj_count}, Sia {sia_count}"
     ]
 
     by_name = {item.get("name"): item for item in datasets if item.get("name")}
@@ -1007,9 +1007,8 @@ def zfs_table_lines(data: dict) -> list[str]:
         visit(root, "", "")
 
     for item, label in ordered:
-        node_type = str(item.get("type") or "-").upper()
         lines.append(
-            f"• {node_type} {label}: "
+            f"• {label}: "
             f"used={fmt_bytes(item.get('used_bytes'))} "
             f"free={fmt_bytes(item.get('available_bytes'))} "
             f"mount={item.get('mountpoint') or '-'}"
