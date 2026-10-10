@@ -9,4 +9,4 @@ if [[ ! -x "$python_bin" ]]; then
     python_bin=$(command -v python3)
 fi
 
-exec "$python_bin" "$repo_dir/scripts/storage_tables.py" smart
+exec "$python_bin" "$repo_dir/scripts/smart_table.py"
