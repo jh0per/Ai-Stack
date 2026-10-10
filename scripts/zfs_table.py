@@ -76,6 +76,35 @@ def colored_progress(percent: float, width: int = 12) -> str:
     )
 
 
+def tree_rows(datasets: list[dict]) -> list[tuple[dict, str]]:
+    by_name = {item["name"]: item for item in datasets}
+    children = {name: [] for name in by_name}
+    roots = []
+
+    for item in datasets:
+        parent = item.get("parent")
+        if parent in by_name:
+            children[parent].append(item["name"])
+        else:
+            roots.append(item["name"])
+
+    output = []
+
+    def visit(name: str, prefix: str, connector: str) -> None:
+        label = name if not connector else f"{prefix}{connector}{name.rsplit('/', 1)[-1]}"
+        output.append((by_name[name], label))
+        names = children[name]
+        child_prefix = prefix + ("    " if connector == "└── " else "│   " if connector else "")
+        for index, child_name in enumerate(names):
+            child_connector = "└── " if index == len(names) - 1 else "├── "
+            visit(child_name, child_prefix, child_connector)
+
+    for root in roots:
+        visit(root, "", "")
+
+    return output
+
+
 def render_table(rows: list[list[str]], percentages: list[float]) -> str:
     widths = []
     for index, header in enumerate(HEADERS):
@@ -101,6 +130,8 @@ def render_table(rows: list[list[str]], percentages: list[float]) -> str:
                     color = BLUE
                 elif row_type == "volume":
                     color = YELLOW
+                elif row_type == "pool":
+                    color = GREEN
             elif index == 2 and percent is not None:
                 color = RED if percent >= 90 else YELLOW
             elif index == 3 and percent is not None:
@@ -129,24 +160,26 @@ def render() -> str:
     if not datasets:
         raise RuntimeError(data.get("error") or "No ZFS filesystems or volumes were found.")
 
+    ordered = tree_rows(datasets)
     percentages = [
         usage_percent(item.get("used_bytes"), item.get("available_bytes"))
-        for item in datasets
+        for item, _ in ordered
     ]
     rows = [
         [
             cell(item.get("type")).upper(),
-            cell(item.get("name")),
+            label,
             human_bytes(item.get("used_bytes")),
             human_bytes(item.get("available_bytes")),
             progress_text(percent),
             cell(item.get("mountpoint")),
         ]
-        for item, percent in zip(datasets, percentages)
+        for (item, label), percent in zip(ordered, percentages)
     ]
     colored_summary = (
         f"{GREEN}●{RESET} {len(datasets)} datasets · "
-        f"{BLUE}FILESYSTEM{RESET} {data.get('filesystem_count', 0)} · "
+        f"{GREEN}POOLS{RESET} {data.get('pool_count', 0)} · "
+        f"{BLUE}DATASETS{RESET} {data.get('dataset_count', 0)} · "
         f"{YELLOW}VOLUME{RESET} {data.get('volume_count', 0)} · "
         f"{CYAN}STORJ tagged{RESET} {data.get('storj_count', 0)} · "
         f"{MAGENTA}SIA tagged{RESET} {data.get('sia_count', 0)}"

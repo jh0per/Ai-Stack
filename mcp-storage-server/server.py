@@ -530,7 +530,12 @@ def zfs_table_json() -> str:
 
         name, kind, used, available, mountpoint = parts[:5]
         suffix = name.rsplit("/", 1)[-1].lower()
-        display_type = suffix if suffix in ("storj", "sia") else kind.lower()
+        if "/" not in name:
+            display_type = "pool"
+        elif suffix in ("storj", "sia"):
+            display_type = suffix
+        else:
+            display_type = kind.lower()
 
         used_bytes = optional_int(used)
         available_bytes = optional_int(available)
@@ -542,6 +547,8 @@ def zfs_table_json() -> str:
             "kind": kind.lower(),
             "name": name,
             "pool": name.split("/", 1)[0],
+            "parent": name.rsplit("/", 1)[0] if "/" in name else None,
+            "depth": name.count("/"),
             "used_bytes": used_bytes,
             "available_bytes": available_bytes,
             "mountpoint": mountpoint,
@@ -552,7 +559,9 @@ def zfs_table_json() -> str:
         "datasets": datasets,
         "storj_count": sum(1 for item in datasets if item["type"] == "storj"),
         "sia_count": sum(1 for item in datasets if item["type"] == "sia"),
-        "filesystem_count": sum(1 for item in datasets if item["kind"] == "filesystem"),
+        "pool_count": sum(1 for item in datasets if item["type"] == "pool"),
+        "dataset_count": sum(1 for item in datasets if item["type"] != "pool"),
+        "filesystem_count": sum(1 for item in datasets if item["type"] == "filesystem"),
         "volume_count": sum(1 for item in datasets if item["kind"] == "volume"),
     }, ensure_ascii=False)
 

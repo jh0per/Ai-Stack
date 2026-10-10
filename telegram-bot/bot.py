@@ -976,10 +976,40 @@ def zfs_table_lines(data: dict) -> list[str]:
         f"Storj {storj_count}, Sia {sia_count}, other {other_count}"
     ]
 
+    by_name = {item.get("name"): item for item in datasets if item.get("name")}
+    children = {name: [] for name in by_name}
+    roots = []
     for item in datasets:
+        name = item.get("name")
+        if not name:
+            continue
+        parent = item.get("parent")
+        if parent in by_name:
+            children[parent].append(name)
+        else:
+            roots.append(name)
+
+    ordered = []
+
+    def visit(name: str, prefix: str, connector: str):
+        label = name if not connector else f"{prefix}{connector}{name.rsplit('/', 1)[-1]}"
+        ordered.append((by_name[name], label))
+        names = children[name]
+        child_prefix = prefix + ("    " if connector == "└── " else "│   " if connector else "")
+        for index, child_name in enumerate(names):
+            visit(
+                child_name,
+                child_prefix,
+                "└── " if index == len(names) - 1 else "├── ",
+            )
+
+    for root in roots:
+        visit(root, "", "")
+
+    for item, label in ordered:
         node_type = str(item.get("type") or "-").upper()
         lines.append(
-            f"• {node_type} {item.get('name') or '-'}: "
+            f"• {node_type} {label}: "
             f"used={fmt_bytes(item.get('used_bytes'))} "
             f"free={fmt_bytes(item.get('available_bytes'))} "
             f"mount={item.get('mountpoint') or '-'}"
