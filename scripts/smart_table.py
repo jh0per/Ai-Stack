@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import os
+import signal
 import sys
 from pathlib import Path
 
@@ -11,6 +12,7 @@ SERVER_PATH = ROOT_DIR / "mcp-storage-server" / "server.py"
 HEADERS = ["DISK", "DEV", "TEMP", "RELO", "PEND", "UNCOR", "HOURS", "SNAPSHOT"]
 WIDTHS = [48, 12, 4, 5, 5, 5, 8, 19]
 RIGHT_ALIGNED = {2, 3, 4, 5, 6}
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 USE_COLOR = sys.stdout.isatty() and not os.getenv("NO_COLOR")
 RESET = "\033[0m" if USE_COLOR else ""
 BOLD = "\033[1m" if USE_COLOR else ""

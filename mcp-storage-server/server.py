@@ -503,7 +503,7 @@ def storage_usage_json() -> str:
 
 @mcp.tool()
 def zfs_table_json() -> str:
-    """Return the Storj and Sia ZFS dataset rows used by the local zfs-table view."""
+    """Return all ZFS filesystem and volume rows used by the local zfs-table view."""
     if not command_exists(ZFS):
         return json.dumps({
             "ok": False,
@@ -516,20 +516,21 @@ def zfs_table_json() -> str:
         "list",
         "-H",
         "-p",
+        "-t",
+        "filesystem,volume",
         "-o",
-        "name,used,avail,mountpoint",
+        "name,type,used,avail,mountpoint",
     ], timeout=60)
     datasets = []
 
     for line in result.splitlines():
         parts = line.split("\t")
-        if len(parts) < 4:
+        if len(parts) < 5:
             continue
 
-        name, used, available, mountpoint = parts[:4]
-        node_type = name.rsplit("/", 1)[-1].lower()
-        if node_type not in ("storj", "sia"):
-            continue
+        name, kind, used, available, mountpoint = parts[:5]
+        suffix = name.rsplit("/", 1)[-1].lower()
+        display_type = suffix if suffix in ("storj", "sia") else kind.lower()
 
         used_bytes = optional_int(used)
         available_bytes = optional_int(available)
@@ -537,7 +538,8 @@ def zfs_table_json() -> str:
             continue
 
         datasets.append({
-            "type": node_type,
+            "type": display_type,
+            "kind": kind.lower(),
             "name": name,
             "pool": name.split("/", 1)[0],
             "used_bytes": used_bytes,
@@ -550,6 +552,8 @@ def zfs_table_json() -> str:
         "datasets": datasets,
         "storj_count": sum(1 for item in datasets if item["type"] == "storj"),
         "sia_count": sum(1 for item in datasets if item["type"] == "sia"),
+        "filesystem_count": sum(1 for item in datasets if item["kind"] == "filesystem"),
+        "volume_count": sum(1 for item in datasets if item["kind"] == "volume"),
     }, ensure_ascii=False)
 
 

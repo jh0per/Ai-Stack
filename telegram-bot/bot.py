@@ -970,7 +970,11 @@ def zfs_table_lines(data: dict) -> list[str]:
 
     storj_count = sum(1 for item in datasets if item.get("type") == "storj")
     sia_count = sum(1 for item in datasets if item.get("type") == "sia")
-    lines = [f"ZFS datasets: {len(datasets)} total, Storj {storj_count}, Sia {sia_count}"]
+    other_count = len(datasets) - storj_count - sia_count
+    lines = [
+        f"ZFS datasets: {len(datasets)} total, "
+        f"Storj {storj_count}, Sia {sia_count}, other {other_count}"
+    ]
 
     for item in datasets:
         node_type = str(item.get("type") or "-").upper()

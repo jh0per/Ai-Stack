@@ -171,7 +171,7 @@ Set `STORAGE_STATUS_URL` if the gateway is not on `http://127.0.0.1:3700/storage
 
 Scheduled Telegram alerts use the generic gateway status and only send critical issues by default. Capacity/fullness warnings are available on demand with `/space` so routine high Sia/Storj allocation does not spam alerts. If the critical alert signature is unchanged, repeats are suppressed for `ALERT_UNCHANGED_COOLDOWN_HOURS` hours.
 
-The `/status` and daily summary messages include the migrated `zfs-table` Storj/Sia dataset rows and passive `smart-table` disk snapshots. `/smart` shows those snapshots plus live NVMe health, while `/space` includes the ZFS dataset table. When smartd logs are available, the gateway does not query spinning disks; it only reads the logs and checks non-spinning NVMe devices. Full live `smartctl` scanning remains a fallback for hosts without logs.
+The `/status` and daily summary messages include all migrated `zfs-table` filesystem/volume rows and passive `smart-table` disk snapshots. `/smart` shows those snapshots plus live NVMe health, while `/space` includes the full ZFS dataset table. When smartd logs are available, the gateway does not query spinning disks; it only reads the logs and checks non-spinning NVMe devices. Full live `smartctl` scanning remains a fallback for hosts without logs.
 
 NAS backup mount monitoring is enabled by default. Set `NAS_MOUNT_PATHS=/mnt/nas-backup` (or your local mountpoint) and `NAS_EXPECTED_FSTYPES=cifs,nfs,nfs4,fuse.sshfs` in `telegram-bot/.env`. The bot sends an alert when the NAS mount disappears and a recovery message when it returns.
 

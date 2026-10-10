@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import os
+import signal
 import sys
 from pathlib import Path
 
@@ -9,14 +10,16 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parents[1]
 SERVER_PATH = ROOT_DIR / "mcp-storage-server" / "server.py"
 HEADERS = ["TYPE", "DATASET", "USED", "FREE", "USAGE", "MOUNTPOINT"]
-WIDTH_CAPS = [5, 42, 8, 8, 17, 42]
+WIDTH_CAPS = [10, 42, 8, 8, 17, 42]
 RIGHT_ALIGNED = {2, 3}
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 USE_COLOR = sys.stdout.isatty() and not os.getenv("NO_COLOR")
 RESET = "\033[0m" if USE_COLOR else ""
 BOLD = "\033[1m" if USE_COLOR else ""
 DIM = "\033[2m" if USE_COLOR else ""
 CYAN = "\033[38;5;45m" if USE_COLOR else ""
 MAGENTA = "\033[38;5;213m" if USE_COLOR else ""
+BLUE = "\033[38;5;75m" if USE_COLOR else ""
 GREEN = "\033[38;5;42m" if USE_COLOR else ""
 YELLOW = "\033[38;5;220m" if USE_COLOR else ""
 RED = "\033[38;5;196m" if USE_COLOR else ""
@@ -90,7 +93,14 @@ def render_table(rows: list[list[str]], percentages: list[float]) -> str:
             value = value.rjust(widths[index]) if index in RIGHT_ALIGNED else value.ljust(widths[index])
             color = ""
             if index == 0:
-                color = CYAN if row_type == "storj" else MAGENTA if row_type == "sia" else ""
+                if row_type == "storj":
+                    color = CYAN
+                elif row_type == "sia":
+                    color = MAGENTA
+                elif row_type == "filesystem":
+                    color = BLUE
+                elif row_type == "volume":
+                    color = YELLOW
             elif index == 2 and percent is not None:
                 color = RED if percent >= 90 else YELLOW
             elif index == 3 and percent is not None:
@@ -117,7 +127,7 @@ def render() -> str:
     data = json.loads(server.zfs_table_json())
     datasets = data.get("datasets", [])
     if not datasets:
-        raise RuntimeError(data.get("error") or "No ZFS datasets ending in /storj or /sia were found.")
+        raise RuntimeError(data.get("error") or "No ZFS filesystems or volumes were found.")
 
     percentages = [
         usage_percent(item.get("used_bytes"), item.get("available_bytes"))
@@ -136,11 +146,13 @@ def render() -> str:
     ]
     colored_summary = (
         f"{GREEN}●{RESET} {len(datasets)} datasets · "
-        f"{CYAN}STORJ{RESET} {data.get('storj_count', 0)} · "
-        f"{MAGENTA}SIA{RESET} {data.get('sia_count', 0)}"
+        f"{BLUE}FILESYSTEM{RESET} {data.get('filesystem_count', 0)} · "
+        f"{YELLOW}VOLUME{RESET} {data.get('volume_count', 0)} · "
+        f"{CYAN}STORJ tagged{RESET} {data.get('storj_count', 0)} · "
+        f"{MAGENTA}SIA tagged{RESET} {data.get('sia_count', 0)}"
     )
     return "\n".join([
-        f"{BOLD}{CYAN}ZFS Storage Datasets{RESET}  {DIM}Storj and Sia{RESET}",
+        f"{BOLD}{CYAN}ZFS Storage Datasets{RESET}  {DIM}all filesystems and volumes{RESET}",
         render_table(rows, percentages),
         colored_summary,
     ])
