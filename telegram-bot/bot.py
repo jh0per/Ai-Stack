@@ -1017,47 +1017,182 @@ def zfs_table_lines(data: dict) -> list[str]:
     return lines
 
 
-def build_storage_report() -> str:
-    data = fetch_storage_status()
+def report_status_icon(status: str) -> str:
+    return {
+        "ok": "🟢",
+        "warning": "🟡",
+        "critical": "🔴",
+        "unknown": "⚪",
+    }.get(str(status).lower(), "⚪")
+
+
+def report_percent(value) -> str:
+    try:
+        return f"{float(value):.0f}%"
+    except (TypeError, ValueError):
+        return "-"
+
+
+def report_number(value) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def build_storage_report_from_data(data: dict) -> str:
     issues = data.get("issues", [])
     recommendations = data.get("recommendations", [])
     nodes = data.get("nodes", [])
-    drives = data.get("drives", [])
+    drives = data.get("smart_table") or data.get("drives") or []
     pools = data.get("pools", [])
-    shown_issues = issues[:12]
+    filesystems = data.get("filesystems", [])
+    node_storage = data.get("node_storage", [])
+    status = str(data.get("status") or "unknown").lower()
+    shown_issues = issues[:10]
+    running_nodes = sum(1 for node in nodes if node.get("status") == "ok")
+    online_pools = sum(
+        1 for pool in pools if str(pool.get("health") or "").upper() == "ONLINE"
+    )
 
     lines = [
-        "🧭 Статус сховища",
-        f"Стан: {data.get('status', 'unknown').upper()}",
-        f"Час: {data.get('checked_at', '-')}",
-        "",
-        data.get("summary", ""),
-        "",
-        f"Ноди OK: {sum(1 for n in nodes if n.get('status') == 'ok')}/{len(nodes)}",
-        f"Pools ONLINE: {sum(1 for p in pools if p.get('health') == 'ONLINE')}/{len(pools)}",
-        f"SMART drives: {len(drives)}",
+        f"🗄 Storage · {report_status_icon(status)} {status.upper()}",
+        f"🕒 {data.get('checked_at', '-')}",
     ]
 
     if issues:
-        lines.extend(["", f"Проблеми, показано {len(shown_issues)} з {len(issues)}:"])
+        lines.extend(["", f"🚨 Проблеми: {len(issues)}"])
         for issue in shown_issues:
+            icon = report_status_icon(issue.get("status") or "unknown")
             lines.append(
-                f"- {issue.get('status', 'unknown')}: "
-                f"{issue.get('area', '-')}: {issue.get('message', '-')}"
+                f"{icon} [{str(issue.get('area') or '-').upper()}] "
+                f"{issue.get('message') or '-'}"
             )
+            if issue.get("action"):
+                lines.append(f"   ↳ {issue['action']}")
         if len(issues) > len(shown_issues):
-            lines.append(f"...ще {len(issues) - len(shown_issues)} проблем у /problems")
+            lines.append(f"…ще {len(issues) - len(shown_issues)} у /status")
     else:
-        lines.extend(["", "Проблем не знайдено."])
+        lines.extend(["", "✅ Проблем не знайдено"])
 
-    if recommendations:
-        lines.extend(["", "Дії:"])
-        for item in recommendations[:6]:
-            lines.append(f"- {item}")
+    lines.extend(["", f"🧩 Ноди: {running_nodes}/{len(nodes)} працюють"])
+    project_parts = []
+    for project in ("storj", "sia"):
+        project_nodes = [node for node in nodes if node.get("project") == project]
+        if project_nodes:
+            project_ok = sum(1 for node in project_nodes if node.get("status") == "ok")
+            project_parts.append(f"{project.capitalize()} {project_ok}/{len(project_nodes)}")
+    if project_parts:
+        lines.append("   " + " · ".join(project_parts))
+    for node in [node for node in nodes if node.get("status") != "ok"][:6]:
+        lines.append(
+            f"   {report_status_icon(node.get('status') or 'unknown')} "
+            f"{node.get('name') or '?'} · {node.get('runtime_status') or node.get('state') or '-'}"
+        )
 
-    lines.extend(["", *zfs_table_lines(data), "", *smart_table_lines(data)])
+    lines.extend(["", f"💧 ZFS pools: {online_pools}/{len(pools)} ONLINE"])
+    ranked_pools = sorted(
+        pools,
+        key=lambda pool: (
+            str(pool.get("health") or "").upper() == "ONLINE",
+            -(report_number(pool.get("capacity_percent")) or 0),
+        ),
+    )
+    for pool in ranked_pools[:8]:
+        health = str(pool.get("health") or "unknown").upper()
+        capacity = report_number(pool.get("capacity_percent"))
+        if health != "ONLINE" or (capacity is not None and capacity >= 90):
+            pool_icon = "🔴"
+        elif capacity is not None and capacity >= 80:
+            pool_icon = "🟡"
+        else:
+            pool_icon = "🟢"
+        lines.append(
+            f"{pool_icon} {pool.get('name') or '?'} · "
+            f"{report_percent(pool.get('capacity_percent'))} used · "
+            f"{pool.get('free') or '-'} free"
+        )
+    if len(ranked_pools) > 8:
+        lines.append(f"…ще {len(ranked_pools) - 8} у /space")
+    elif not ranked_pools:
+        lines.append("⚪ Дані недоступні")
+
+    ranked_filesystems = sorted(
+        [item for item in filesystems if report_number(item.get("use_percent")) is not None],
+        key=lambda item: report_number(item.get("use_percent")) or 0,
+        reverse=True,
+    )
+    full_filesystems = sum(
+        1 for item in ranked_filesystems if (report_number(item.get("use_percent")) or 0) >= 80
+    )
+    lines.extend([
+        "",
+        f"📁 Filesystems: {len(filesystems)} · ≥80%: {full_filesystems}",
+        "Топ за заповненням:",
+    ])
+    for item in ranked_filesystems[:5]:
+        percent = report_number(item.get("use_percent")) or 0
+        icon = "🔴" if percent >= 90 else "🟡" if percent >= 80 else "🟢"
+        lines.append(
+            f"{icon} {item.get('mountpoint') or '?'} · {percent:.0f}% · "
+            f"{item.get('available') or '-'} free"
+        )
+    if not ranked_filesystems:
+        lines.append("⚪ Дані недоступні")
+
+    ranked_allocations = sorted(
+        [item for item in node_storage if report_number(item.get("usage_percent")) is not None],
+        key=lambda item: report_number(item.get("usage_percent")) or 0,
+        reverse=True,
+    )
+    if ranked_allocations:
+        lines.extend(["", f"📦 Node allocations: {len(ranked_allocations)}"])
+        for item in ranked_allocations[:5]:
+            percent = report_number(item.get("usage_percent")) or 0
+            icon = "🔴" if percent >= 95 else "🟡" if percent >= 80 else "🟢"
+            lines.append(
+                f"{icon} {item.get('mountpoint') or item.get('name') or '?'} · "
+                f"{percent:.0f}% · {item.get('type') or 'node'}"
+            )
+
+    connected_drives = [drive for drive in drives if drive.get("connected") is not False]
+    historical_drives = len(drives) - len(connected_drives)
+    problem_drives = [drive for drive in connected_drives if drive.get("status") != "ok"]
+    lines.extend([
+        "",
+        f"💽 SMART: {len(connected_drives)} connected · "
+        f"проблем {len(problem_drives)} · historical {historical_drives}",
+    ])
+    for drive in problem_drives[:6]:
+        name = drive.get("device") or drive.get("name") or "?"
+        reasons = ", ".join(drive.get("reasons") or [])
+        detail = reasons or f"status={drive.get('status') or 'unknown'}"
+        lines.append(
+            f"   {report_status_icon(drive.get('status') or 'unknown')} "
+            f"{name} · {detail}"
+        )
+
+    if issues and recommendations:
+        lines.extend(["", "💡 Рекомендації"])
+        for item in recommendations[:3]:
+            lines.append(f"• {item}")
+
+    lines.extend(["", "Деталі: /status · /space · /smart · /nas"])
 
     return "\n".join(lines).strip()
+
+
+def build_storage_report() -> str:
+    return build_storage_report_from_data(fetch_storage_status())
+
+
+def build_daily_storage_report() -> str:
+    data = fetch_storage_status()
+    return "\n\n".join([
+        build_storage_report_from_data(data),
+        "\n".join(zfs_table_lines(data)),
+        "\n".join(smart_table_lines(data)),
+    ])
 
 
 def build_smart_report() -> str:
@@ -1401,7 +1536,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Команди:\n\n"
         "/status — тільки storage проблеми\n"
         "/problems — alias для /status\n"
-        "/storage — повний storage/Sia/Storj/FS статус\n"
+        "/storage — читабельний storage/Sia/Storj/FS звіт\n"
         "/space — переповненість pools/filesystems/nodes\n"
         "/smart — SMART/disk health\n"
         "/nas — NAS mount status для backup\n"
@@ -1545,7 +1680,7 @@ async def daily_summary_job(context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        report = await asyncio.to_thread(build_storage_report)
+        report = await asyncio.to_thread(build_daily_storage_report)
     except Exception as e:
         report = f"⚠️ storage daily summary error: {e}"
 
