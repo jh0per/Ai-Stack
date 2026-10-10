@@ -100,17 +100,41 @@ curl http://127.0.0.1:3700/health
 curl http://127.0.0.1:3700/storage/status
 ```
 
-Local terminal tables use the same collectors as the MCP API:
+Local terminal monitoring commands:
 
 ```bash
 ./scripts/smart-table
 ./scripts/zfs-table
+./scripts/node-table /path/to/node-configs
 ```
+
+`node-table` builds separate Storj and Sia inventories from live Docker
+configuration. The required path limits discovery to containers whose run,
+Compose, data, or storage paths are below that directory. All displayed values
+are collected at runtime; the script contains no node inventory, credentials,
+addresses, or machine-specific paths.
+
+The default view groups fields so the tables fit the detected terminal width:
+
+```bash
+./scripts/node-table /path/to/node-configs --only storj
+./scripts/node-table /path/to/node-configs --only sia
+./scripts/node-table /path/to/node-configs --width 120
+./scripts/node-table /path/to/node-configs --wide
+./scripts/node-table /path/to/node-configs --json
+```
+
+Storj addresses come from the container's `ADDRESS` setting. Sia listen
+addresses come from the running container command. Hosting providers and other
+external annotations are intentionally not guessed. The script is safe to
+publish, but its runtime output can contain real addresses and filesystem paths,
+so treat captured output as private operational data.
 
 To make a command available system-wide, symlink it from the checked-out repository, for example:
 
 ```bash
 sudo ln -s "$(pwd)/scripts/zfs-table" /usr/local/sbin/zfs-table
+sudo ln -s "$(pwd)/scripts/node-table" /usr/local/sbin/node-table
 ```
 
 Open the browser chat:
