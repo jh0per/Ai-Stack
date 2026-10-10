@@ -622,9 +622,13 @@ def smart_nvme_devices_json() -> str:
             continue
 
         device = f"/dev/{name}"
-        result = run_json_cmd(smartctl_cmd(["-a", "-j", device]), timeout=120)
+        # Some NVMe controllers return a non-zero status for an unsupported
+        # self-test log even though health and attributes are readable. Query
+        # only the data this collector consumes.
+        args = ["-H", "-A", "-j", device]
+        result = run_json_cmd(smartctl_cmd(args), timeout=120)
         if not result.get("ok") and SMARTCTL_USE_SUDO:
-            direct_result = run_json_cmd(direct_smartctl_cmd(["-a", "-j", device]), timeout=120)
+            direct_result = run_json_cmd(direct_smartctl_cmd(args), timeout=120)
             result = {
                 **direct_result,
                 "sudo_error": result,

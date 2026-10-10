@@ -1157,11 +1157,20 @@ def build_storage_report_from_data(data: dict) -> str:
 
     connected_drives = [drive for drive in drives if drive.get("connected") is not False]
     historical_drives = len(drives) - len(connected_drives)
-    problem_drives = [drive for drive in connected_drives if drive.get("status") != "ok"]
+    problem_drives = [
+        drive for drive in connected_drives
+        if int(drive.get("severity") or 0) >= 2
+        or str(drive.get("status") or "").lower() in ("warning", "critical")
+    ]
+    unknown_drives = [
+        drive for drive in connected_drives
+        if drive not in problem_drives and drive.get("status") != "ok"
+    ]
     lines.extend([
         "",
         f"💽 SMART: {len(connected_drives)} connected · "
-        f"проблем {len(problem_drives)} · historical {historical_drives}",
+        f"проблем {len(problem_drives)} · unknown {len(unknown_drives)} · "
+        f"historical {historical_drives}",
     ])
     for drive in problem_drives[:6]:
         name = drive.get("device") or drive.get("name") or "?"
@@ -1171,6 +1180,11 @@ def build_storage_report_from_data(data: dict) -> str:
             f"   {report_status_icon(drive.get('status') or 'unknown')} "
             f"{name} · {detail}"
         )
+    for drive in unknown_drives[:6]:
+        name = drive.get("device") or drive.get("name") or "?"
+        reasons = ", ".join(drive.get("reasons") or [])
+        detail = reasons or "SMART дані недоступні"
+        lines.append(f"   ⚪ {name} · unknown · {detail}")
 
     if issues and recommendations:
         lines.extend(["", "💡 Рекомендації"])

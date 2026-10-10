@@ -735,6 +735,7 @@ def extract_smart_drives(smart_text: str) -> list[dict[str, Any]]:
     for item in data.get("devices", []) or []:
         result = item.get("result", {})
         raw = result.get("data", {}) if result.get("ok") else {}
+        is_nvme = str(item.get("type") or "").lower() == "nvme"
         passed = raw.get("smart_status", {}).get("passed")
         temp = raw.get("temperature", {}).get("current")
         reallocated = smart_attr(raw, {"reallocated_sector_ct", "reallocated_event_count"})
@@ -756,10 +757,12 @@ def extract_smart_drives(smart_text: str) -> list[dict[str, Any]]:
         if reallocated and reallocated > 0:
             severity = max(severity, 2)
             reasons.append(f"reallocated sectors/events: {reallocated}")
-        if isinstance(temp, int) and temp >= 55:
+        critical_temp = 75 if is_nvme else 55
+        warning_temp = 65 if is_nvme else 45
+        if isinstance(temp, int) and temp >= critical_temp:
             severity = max(severity, 3)
             reasons.append(f"temperature: {temp}C")
-        elif isinstance(temp, int) and temp >= 45:
+        elif isinstance(temp, int) and temp >= warning_temp:
             severity = max(severity, 2)
             reasons.append(f"temperature: {temp}C")
         if not result.get("ok"):
