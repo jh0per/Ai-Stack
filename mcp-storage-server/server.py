@@ -1,6 +1,8 @@
-import os
+import csv
 import json
+import os
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -19,6 +21,7 @@ LSBLK = os.getenv("LSBLK_BIN", "/usr/bin/lsblk").strip()
 FINDMNT = os.getenv("FINDMNT_BIN", "/usr/bin/findmnt").strip()
 SMARTCTL = os.getenv("SMARTCTL_BIN", "/usr/sbin/smartctl").strip()
 SMARTCTL_USE_SUDO = os.getenv("SMARTCTL_USE_SUDO", "0").strip() == "1"
+SMART_LOG_DIR = Path(os.getenv("SMART_LOG_DIR", "/var/lib/smartmontools").strip())
 DOCKER = os.getenv("DOCKER_BIN", "/usr/bin/docker").strip()
 SYSTEMCTL = os.getenv("SYSTEMCTL_BIN", "/usr/bin/systemctl").strip()
 
@@ -122,6 +125,150 @@ def parse_smart_text_attributes(text: str) -> list[dict]:
         })
 
     return rows
+
+
+def read_last_line(path: Path) -> str:
+    """Read the final non-empty line without loading a multi-megabyte smartd log."""
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        position = handle.tell()
+        buffer = bytearray()
+
+        while position > 0:
+            position -= 1
+            handle.seek(position)
+            char = handle.read(1)
+            if char == b"\n" and buffer:
+                break
+            if char not in (b"\n", b"\r"):
+                buffer.extend(char)
+
+    return bytes(reversed(buffer)).decode("utf-8", errors="replace").strip()
+
+
+def optional_int(value: str | None) -> int | None:
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def smartd_device_map() -> dict[str, str]:
+    if not command_exists(LSBLK):
+        return {}
+
+    result = run_json_cmd([LSBLK, "-J", "-d", "-o", "NAME,SERIAL"])
+    mapping = {}
+
+    for device in result.get("data", {}).get("blockdevices", []) or []:
+        name = str(device.get("name") or "").strip()
+        serial = str(device.get("serial") or "").strip()
+        if name and serial:
+            mapping[serial] = f"/dev/{name}"
+
+    return mapping
+
+
+def parse_smartd_snapshot(path: Path, devices: dict[str, str]) -> dict | None:
+    filename = path.name
+    if filename.endswith(".ata.csv"):
+        protocol = "ATA"
+        stem = filename.removeprefix("attrlog.").removesuffix(".ata.csv")
+    elif filename.endswith(".scsi.csv"):
+        protocol = "SAS"
+        stem = filename.removeprefix("attrlog.").removesuffix(".scsi.csv")
+    else:
+        return None
+
+    line = read_last_line(path)
+    if not line:
+        return None
+
+    fields = [value.strip() for value in next(csv.reader([line], delimiter=";"))]
+    snapshot_at = fields[0] if fields else ""
+    attributes = {}
+
+    if protocol == "ATA":
+        for index in range(1, len(fields) - 2, 3):
+            attr_id = fields[index]
+            raw_value = fields[index + 2]
+            if attr_id and raw_value:
+                attributes[attr_id] = raw_value
+
+        temperature_raw = optional_int(attributes.get("194") or attributes.get("190"))
+        temperature = temperature_raw & 0xFFFF if temperature_raw is not None else None
+        hours_raw = optional_int(attributes.get("9"))
+        if hours_raw is None:
+            power_on_hours = None
+        elif hours_raw > 0xFFFFFFFF:
+            power_on_hours = hours_raw & 0xFFFF
+        else:
+            power_on_hours = hours_raw & 0xFFFFFFFF
+
+        reallocated = optional_int(attributes.get("5"))
+        pending = optional_int(attributes.get("197"))
+        uncorrectable = optional_int(attributes.get("198"))
+    else:
+        for index in range(1, len(fields) - 1, 2):
+            key = fields[index]
+            value = fields[index + 1]
+            if key and value:
+                attributes[key] = value
+
+        temperature = optional_int(attributes.get("temperature"))
+        power_on_hours = None
+        reallocated = None
+        pending = None
+        error_values = [
+            optional_int(attributes.get(key))
+            for key in (
+                "read-total-unc-errors",
+                "write-total-unc-errors",
+                "verify-total-unc-errors",
+            )
+        ]
+        present_errors = [value for value in error_values if value is not None]
+        uncorrectable = sum(present_errors) if present_errors else None
+
+    serial = stem.rsplit("-", 1)[-1]
+    model = stem.rsplit("-", 1)[0].replace("_", " ") if "-" in stem else stem.replace("_", " ")
+    device = devices.get(serial)
+    severity = 0
+    reasons = []
+
+    if temperature is not None and temperature > 51:
+        severity = max(severity, 3)
+        reasons.append(f"temperature: {temperature}C")
+    elif temperature is not None and temperature > 41:
+        severity = max(severity, 2)
+        reasons.append(f"temperature: {temperature}C")
+    if reallocated is not None and reallocated > 0:
+        severity = max(severity, 2)
+        reasons.append(f"reallocated sectors/events: {reallocated}")
+    if pending is not None and pending > 0:
+        severity = max(severity, 3)
+        reasons.append(f"pending sectors: {pending}")
+    if uncorrectable is not None and uncorrectable > 0:
+        severity = max(severity, 3)
+        reasons.append(f"uncorrectable errors: {uncorrectable}")
+
+    return {
+        "name": device or serial,
+        "device": device,
+        "connected": device is not None,
+        "protocol": protocol,
+        "model": model,
+        "serial": serial,
+        "snapshot_at": snapshot_at,
+        "temperature_c": temperature,
+        "power_on_hours": power_on_hours,
+        "reallocated": reallocated,
+        "pending": pending,
+        "uncorrectable": uncorrectable,
+        "severity": severity,
+        "status": "critical" if severity >= 3 else "warning" if severity >= 2 else "ok",
+        "reasons": reasons,
+    }
 
 
 def ensure_allowed_path(path: str) -> Path:
@@ -351,6 +498,139 @@ def storage_usage_json() -> str:
         "ok": True,
         "datasets": datasets,
         "findmnt": mounts,
+    }, ensure_ascii=False)
+
+
+@mcp.tool()
+def zfs_table_json() -> str:
+    """Return the Storj and Sia ZFS dataset rows used by the local zfs-table view."""
+    if not command_exists(ZFS):
+        return json.dumps({
+            "ok": False,
+            "error": f"zfs not found or not executable: {ZFS}",
+            "datasets": [],
+        })
+
+    result = run_cmd([
+        ZFS,
+        "list",
+        "-H",
+        "-p",
+        "-o",
+        "name,used,avail,mountpoint",
+    ], timeout=60)
+    datasets = []
+
+    for line in result.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 4:
+            continue
+
+        name, used, available, mountpoint = parts[:4]
+        node_type = name.rsplit("/", 1)[-1].lower()
+        if node_type not in ("storj", "sia"):
+            continue
+
+        used_bytes = optional_int(used)
+        available_bytes = optional_int(available)
+        if used_bytes is None or available_bytes is None:
+            continue
+
+        datasets.append({
+            "type": node_type,
+            "name": name,
+            "pool": name.split("/", 1)[0],
+            "used_bytes": used_bytes,
+            "available_bytes": available_bytes,
+            "mountpoint": mountpoint,
+        })
+
+    return json.dumps({
+        "ok": "EXIT_CODE=" not in result and not result.startswith("ERROR"),
+        "datasets": datasets,
+        "storj_count": sum(1 for item in datasets if item["type"] == "storj"),
+        "sia_count": sum(1 for item in datasets if item["type"] == "sia"),
+    }, ensure_ascii=False)
+
+
+@mcp.tool()
+def smart_table_json() -> str:
+    """Return the latest smartd ATA/SAS snapshots without querying or waking disks."""
+    if not SMART_LOG_DIR.is_dir():
+        return json.dumps({
+            "ok": False,
+            "error": f"SMART log directory does not exist: {SMART_LOG_DIR}",
+            "drives": [],
+        })
+
+    devices = smartd_device_map()
+    paths = sorted({
+        *SMART_LOG_DIR.glob("attrlog.*.ata.csv"),
+        *SMART_LOG_DIR.glob("attrlog.*.scsi.csv"),
+    })
+    drives = []
+    errors = []
+
+    for path in paths:
+        try:
+            snapshot = parse_smartd_snapshot(path, devices)
+            if snapshot:
+                drives.append(snapshot)
+        except Exception as exc:
+            errors.append(f"{path.name}: {exc}")
+
+    drives.sort(key=lambda item: (not item["connected"], item.get("device") or item["serial"]))
+
+    return json.dumps({
+        "ok": bool(drives),
+        "source": "smartd_attribute_logs",
+        "log_dir": str(SMART_LOG_DIR),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "drives": drives,
+        "connected_count": sum(1 for item in drives if item["connected"]),
+        "historical_count": sum(1 for item in drives if not item["connected"]),
+        "errors": errors,
+    }, ensure_ascii=False)
+
+
+@mcp.tool()
+def smart_nvme_devices_json() -> str:
+    """Return live SMART data for NVMe devices without touching spinning disks."""
+    if not command_exists(SMARTCTL) or not command_exists(LSBLK):
+        return json.dumps({
+            "ok": False,
+            "error": "smartctl or lsblk is not available.",
+            "devices": [],
+        })
+
+    block_devices = run_json_cmd([LSBLK, "-J", "-d", "-o", "NAME,TYPE,TRAN"])
+    devices = []
+
+    for item in block_devices.get("data", {}).get("blockdevices", []) or []:
+        name = str(item.get("name") or "").strip()
+        transport = str(item.get("tran") or "").strip().lower()
+        if not name or not (name.startswith("nvme") or transport == "nvme"):
+            continue
+
+        device = f"/dev/{name}"
+        result = run_json_cmd(smartctl_cmd(["-a", "-j", device]), timeout=120)
+        if not result.get("ok") and SMARTCTL_USE_SUDO:
+            direct_result = run_json_cmd(direct_smartctl_cmd(["-a", "-j", device]), timeout=120)
+            result = {
+                **direct_result,
+                "sudo_error": result,
+                "fallback_without_sudo": True,
+            }
+
+        devices.append({
+            "name": device,
+            "type": "nvme",
+            "result": result,
+        })
+
+    return json.dumps({
+        "ok": bool(devices),
+        "devices": devices,
     }, ensure_ascii=False)
 
 

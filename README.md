@@ -79,10 +79,11 @@ Important options:
 
 - `LANGUAGE=uk` or `LANGUAGE=en`
 - `OLLAMA_URL=http://127.0.0.1:11434/api/chat`
-- `OLLAMA_MODEL=ua-tech`
+- `OLLAMA_MODEL=qwen3.5:9b`
 - `GATEWAY_HOST=127.0.0.1` for local-only browser access; use `0.0.0.0` only on a trusted network
 - `GATEWAY_PORT=3700`
 - `SMARTCTL_USE_SUDO=0` by default; set to `1` only if passwordless sudo is configured for `smartctl`
+- `SMART_LOG_DIR=/var/lib/smartmontools` for passive SMART data from smartd attribute logs
 - `FS_ALLOWED_ROOTS=/mnt` or another safe comma-separated path list
 - `WEB_SEARCH_ENABLED=0` unless you run local SearXNG
 
@@ -157,6 +158,10 @@ Set `STORAGE_STATUS_URL` if the gateway is not on `http://127.0.0.1:3700/storage
 
 Scheduled Telegram alerts use the generic gateway status and only send critical issues by default. Capacity/fullness warnings are available on demand with `/space` so routine high Sia/Storj allocation does not spam alerts. If the critical alert signature is unchanged, repeats are suppressed for `ALERT_UNCHANGED_COOLDOWN_HOURS` hours.
 
+The `/status` and daily summary messages include the migrated `zfs-table` Storj/Sia dataset rows and passive `smart-table` disk snapshots. `/smart` shows those snapshots plus live NVMe health, while `/space` includes the ZFS dataset table. When smartd logs are available, the gateway does not query spinning disks; it only reads the logs and checks non-spinning NVMe devices. Full live `smartctl` scanning remains a fallback for hosts without logs.
+
+NAS backup mount monitoring is enabled by default. Set `NAS_MOUNT_PATHS=/mnt/nas-backup` (or your local mountpoint) and `NAS_EXPECTED_FSTYPES=cifs,nfs,nfs4,fuse.sshfs` in `telegram-bot/.env`. The bot sends an alert when the NAS mount disappears and a recovery message when it returns.
+
 Run manually:
 
 ```bash
@@ -193,6 +198,7 @@ Useful Telegram commands:
 - `/problems` - only storage problems from the gateway
 - `/space` - pool, filesystem, and node allocation fullness from the gateway
 - `/smart` - SMART and disk health summary from the gateway
+- `/nas` - NAS mount status used by backup protection
 - `/storage` - alias-style explicit storage status command
 - `/health` - alias for `/status`
 - `/disks` - alias for `/smart`

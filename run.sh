@@ -14,6 +14,14 @@ if [ -f .env ]; then
   set +a
 fi
 
+LLM_ENV_FILE="${LLM_ENV_FILE:-}"
+if [ -n "$LLM_ENV_FILE" ] && [ -f "$LLM_ENV_FILE" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$LLM_ENV_FILE"
+  set +a
+fi
+
 GATEWAY_HOST="${GATEWAY_HOST:-127.0.0.1}"
 GATEWAY_PORT="${GATEWAY_PORT:-3700}"
 

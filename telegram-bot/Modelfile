@@ -1,4 +1,19 @@
-FROM gemma3:12b
+FROM qwen3:30b-a3b
+
+TEMPLATE """{{ if .System }}<|im_start|>system
+{{ .System }}<|im_end|>
+{{ end }}{{ range .Messages }}{{ if eq .Role "user" }}<|im_start|>user
+{{ .Content }}<|im_end|>
+{{ else if eq .Role "assistant" }}<|im_start|>assistant
+{{ .Content }}<|im_end|>
+{{ end }}{{ end }}<|im_start|>assistant
+"""
+
+PARAMETER stop <|im_start|>
+PARAMETER stop <|im_end|>
+PARAMETER temperature 0.6
+PARAMETER top_k 20
+PARAMETER top_p 0.95
 
 SYSTEM """
 Ти технічний асистент українською мовою.

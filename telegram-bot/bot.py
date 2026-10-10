@@ -42,7 +42,7 @@ WARN_DATASET_CAP = float(os.getenv("WARN_DATASET_CAP", "90"))
 
 AI_ENABLED = os.getenv("AI_ENABLED", "0").strip() == "1"
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434/api/chat").strip()
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:3b").strip()
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3.5:9b").strip()
 
 ZPOOL = os.getenv("ZPOOL_BIN", "/usr/sbin/zpool").strip()
 ZFS = os.getenv("ZFS_BIN", "/usr/sbin/zfs").strip()
@@ -50,6 +50,23 @@ STORAGE_STATUS_URL = os.getenv(
     "STORAGE_STATUS_URL",
     "http://127.0.0.1:3700/storage/status",
 ).strip()
+FINDMNT = os.getenv("FINDMNT_BIN", "/usr/bin/findmnt").strip()
+MOUNTPOINT = os.getenv("MOUNTPOINT_BIN", "/usr/bin/mountpoint").strip()
+
+NAS_MONITOR_ENABLED = os.getenv("NAS_MONITOR_ENABLED", "1").strip() == "1"
+NAS_MOUNT_PATHS = [
+    item.strip()
+    for item in os.getenv("NAS_MOUNT_PATHS", "/mnt/nas-backup").split(",")
+    if item.strip()
+]
+NAS_EXPECTED_FSTYPES = {
+    item.strip()
+    for item in os.getenv("NAS_EXPECTED_FSTYPES", "cifs,nfs,nfs4,fuse.sshfs").split(",")
+    if item.strip()
+}
+NAS_ALERT_UNCHANGED_COOLDOWN_HOURS = float(
+    os.getenv("NAS_ALERT_UNCHANGED_COOLDOWN_HOURS", str(ALERT_UNCHANGED_COOLDOWN_HOURS))
+)
 
 
 @dataclass
@@ -420,19 +437,161 @@ def parse_state_time(value: str):
         return None
 
 
-def unchanged_alert_in_cooldown(state: dict, signature: str) -> bool:
+def unchanged_alert_in_cooldown(
+    state: dict,
+    signature: str,
+    signature_key: str = "last_storage_problem_signature",
+    time_key: str = "last_storage_problem_time",
+    cooldown_hours: float | None = None,
+) -> bool:
     if not ALERT_ONLY_ON_CHANGE:
         return False
 
-    if state.get("last_storage_problem_signature") != signature:
+    if state.get(signature_key) != signature:
         return False
 
-    last_sent = parse_state_time(state.get("last_storage_problem_time", ""))
+    last_sent = parse_state_time(state.get(time_key, ""))
     if not last_sent:
         return False
 
+    if cooldown_hours is None:
+        cooldown_hours = ALERT_UNCHANGED_COOLDOWN_HOURS
+
     elapsed = datetime.now(ZoneInfo(TIMEZONE)) - last_sent
-    return elapsed < timedelta(hours=ALERT_UNCHANGED_COOLDOWN_HOURS)
+    return elapsed < timedelta(hours=cooldown_hours)
+
+
+def inspect_nas_mount(path: str) -> dict:
+    status = {
+        "path": path,
+        "ok": False,
+        "state": "unknown",
+        "source": "-",
+        "fstype": "-",
+        "message": "",
+        "action": "",
+    }
+
+    target = Path(path)
+
+    if not target.exists():
+        status.update({
+            "state": "missing",
+            "message": f"NAS mount path does not exist: {path}",
+            "action": "Create the mountpoint directory and mount the NAS share before backups run.",
+        })
+        return status
+
+    _, stderr, code = run_cmd([MOUNTPOINT, "-q", path], timeout=10)
+    if code != 0:
+        detail = stderr.strip()
+        if detail:
+            detail = f" ({detail})"
+
+        status.update({
+            "state": "unmounted",
+            "message": f"NAS is not mounted at {path}{detail}",
+            "action": "Mount the NAS share. Backups must not write to the local mountpoint directory.",
+        })
+        return status
+
+    stdout, stderr, code = run_cmd(
+        [FINDMNT, "-n", "-T", path, "-o", "SOURCE,FSTYPE"],
+        timeout=10,
+    )
+    if code != 0 or not stdout.strip():
+        status.update({
+            "state": "unknown",
+            "message": f"NAS mount {path} is mounted, but findmnt did not return source/fstype.",
+            "action": stderr or "Check findmnt and mount table.",
+        })
+        return status
+
+    parts = stdout.split(None, 1)
+    source = parts[0] if parts else "-"
+    fstype = parts[1].strip() if len(parts) > 1 else "-"
+
+    status["source"] = source
+    status["fstype"] = fstype
+
+    if NAS_EXPECTED_FSTYPES and fstype not in NAS_EXPECTED_FSTYPES:
+        status.update({
+            "state": "wrong_fstype",
+            "message": f"NAS mount {path} has unexpected filesystem type {fstype}.",
+            "action": f"Expected one of: {', '.join(sorted(NAS_EXPECTED_FSTYPES))}. Check that this is the real NAS mount.",
+        })
+        return status
+
+    status.update({
+        "ok": True,
+        "state": "mounted",
+        "message": f"NAS mounted at {path}",
+        "action": "",
+    })
+    return status
+
+
+def get_nas_statuses() -> list[dict]:
+    if not NAS_MONITOR_ENABLED:
+        return []
+
+    return [inspect_nas_mount(path) for path in NAS_MOUNT_PATHS]
+
+
+def nas_alert_issues(statuses: list[dict] | None = None) -> list[dict]:
+    if statuses is None:
+        statuses = get_nas_statuses()
+
+    return [item for item in statuses if not item.get("ok")]
+
+
+def nas_alert_signature(issues: list[dict]) -> str:
+    stable = [
+        {
+            "path": issue.get("path"),
+            "state": issue.get("state"),
+            "source": issue.get("source"),
+            "fstype": issue.get("fstype"),
+            "message": issue.get("message"),
+            "action": issue.get("action"),
+        }
+        for issue in issues
+    ]
+
+    payload = json.dumps(stable, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def build_nas_report(statuses: list[dict] | None = None) -> str:
+    if not NAS_MONITOR_ENABLED:
+        return "NAS monitor disabled. Set NAS_MONITOR_ENABLED=1 to enable it."
+
+    if statuses is None:
+        statuses = get_nas_statuses()
+
+    lines = [
+        "🗄 NAS mount status",
+        f"🖥 Host: {socket.gethostname()}",
+        f"🕒 {now_text()}",
+        "",
+    ]
+
+    if not NAS_MOUNT_PATHS:
+        lines.append("NAS_MOUNT_PATHS is empty; nothing is monitored.")
+        return "\n".join(lines).strip()
+
+    for item in statuses:
+        icon = "✅" if item.get("ok") else "🚨"
+        lines.append(
+            f"{icon} {item.get('path')}: {item.get('state')} | "
+            f"fs={item.get('fstype')} | source={item.get('source')}"
+        )
+        if item.get("message"):
+            lines.append(f"   {item['message']}")
+        if item.get("action"):
+            lines.append(f"   Дія: {item['action']}")
+
+    return "\n".join(lines).strip()
 
 
 def build_status_report(data: dict | None = None) -> str:
@@ -771,6 +930,60 @@ def fetch_storage_status() -> dict:
     return response.json()
 
 
+def metric(value, suffix: str = "") -> str:
+    return "-" if value is None else f"{value}{suffix}"
+
+
+def smart_table_lines(data: dict) -> list[str]:
+    drives = data.get("smart_table") or data.get("drives", [])
+    if not drives:
+        return ["SMART snapshot-и недоступні."]
+
+    connected = sum(1 for drive in drives if drive.get("connected") is not False)
+    historical = len(drives) - connected
+    lines = [f"SMART snapshots: {connected} connected, {historical} historical"]
+
+    for drive in drives:
+        connected_now = drive.get("connected") is not False
+        icon = "✅" if connected_now and drive.get("status") == "ok" else "⚠️" if connected_now else "○"
+        name = drive.get("device") or drive.get("name") or "?"
+        model = drive.get("model") or "-"
+        serial = drive.get("serial") or "-"
+        lines.append(f"{icon} {name} · {model} · {serial} · {drive.get('protocol') or drive.get('type') or '-'}")
+        lines.append(
+            "   "
+            f"temp={metric(drive.get('temperature_c'), '°C')} "
+            f"relo={metric(drive.get('reallocated'))} "
+            f"pend={metric(drive.get('pending'))} "
+            f"uncor={metric(drive.get('uncorrectable'))} "
+            f"hours={metric(drive.get('power_on_hours'))} "
+            f"snap={drive.get('snapshot_at') or '-'}"
+        )
+
+    return lines
+
+
+def zfs_table_lines(data: dict) -> list[str]:
+    datasets = data.get("zfs_table") or []
+    if not datasets:
+        return ["ZFS Sia/Storj datasets недоступні."]
+
+    storj_count = sum(1 for item in datasets if item.get("type") == "storj")
+    sia_count = sum(1 for item in datasets if item.get("type") == "sia")
+    lines = [f"ZFS datasets: {len(datasets)} total, Storj {storj_count}, Sia {sia_count}"]
+
+    for item in datasets:
+        node_type = str(item.get("type") or "-").upper()
+        lines.append(
+            f"• {node_type} {item.get('name') or '-'}: "
+            f"used={fmt_bytes(item.get('used_bytes'))} "
+            f"free={fmt_bytes(item.get('available_bytes'))} "
+            f"mount={item.get('mountpoint') or '-'}"
+        )
+
+    return lines
+
+
 def build_storage_report() -> str:
     data = fetch_storage_status()
     issues = data.get("issues", [])
@@ -809,46 +1022,20 @@ def build_storage_report() -> str:
         for item in recommendations[:6]:
             lines.append(f"- {item}")
 
+    lines.extend(["", *zfs_table_lines(data), "", *smart_table_lines(data)])
+
     return "\n".join(lines).strip()
 
 
 def build_smart_report() -> str:
     data = fetch_storage_status()
-    drives = data.get("drives", [])
 
     lines = [
         "💾 SMART / disk health",
         f"Час: {data.get('checked_at', '-')}",
-        f"Disks: {len(drives)}",
         "",
     ]
-
-    if not drives:
-        lines.append("SMART диски не знайдені або gateway не повернув drive дані.")
-        return "\n".join(lines).strip()
-
-    problem_drives = [
-        d for d in drives
-        if d.get("status") not in ("ok", None) or d.get("reallocated") or d.get("pending") or d.get("uncorrectable")
-    ]
-
-    if not problem_drives:
-        lines.append("Явних SMART проблем не знайдено в доступних даних.")
-        lines.append("Якщо всі диски unknown, перевір права smartctl/sudo.")
-    else:
-        lines.append("Проблемні/невідомі диски:")
-
-    for drive in (problem_drives or drives)[:24]:
-        reasons = ", ".join(drive.get("reasons", [])) or "-"
-        model = drive.get("model") or "-"
-        serial = drive.get("serial") or "-"
-        lines.append(
-            f"- {drive.get('name')}: {drive.get('status')} | "
-            f"{model} | serial {serial} | "
-            f"realloc={drive.get('reallocated')} "
-            f"pending={drive.get('pending')} "
-            f"uncorr={drive.get('uncorrectable')} | {reasons}"
-        )
+    lines.extend(smart_table_lines(data))
 
     return "\n".join(lines).strip()
 
@@ -961,6 +1148,8 @@ def build_space_report() -> str:
                 f"- {item.get('mountpoint') or item.get('name')}: "
                 f"{item.get('usage_percent')}% ({item.get('type', 'node')})"
             )
+
+    lines.extend(["", *zfs_table_lines(data)])
 
     return "\n".join(lines).strip()
 
@@ -1100,6 +1289,20 @@ async def space_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_long_message(context, update.effective_chat.id, report)
 
 
+async def nas_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        await update.message.reply_text("⛔ Немає доступу.")
+        return
+
+    await update.message.reply_text("Перевіряю NAS mount...")
+    try:
+        report = await asyncio.to_thread(build_nas_report)
+    except Exception as e:
+        report = f"⚠️ NAS status error: {e}"
+
+    await send_long_message(context, update.effective_chat.id, report)
+
+
 async def intro_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update):
         await update.message.reply_text("⛔ Немає доступу.")
@@ -1167,6 +1370,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/problems — тільки storage проблеми\n"
         "/space — переповненість pools/filesystems/nodes\n"
         "/smart — SMART/disk health\n"
+        "/nas — NAS mount status для backup\n"
         "/ask питання — спитати Ollama\n"
         "\n"
         "ZFS-only:\n"
@@ -1184,9 +1388,58 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 
+async def maybe_send_nas_alert(context: ContextTypes.DEFAULT_TYPE):
+    if not ALLOWED_CHAT_ID or not NAS_MONITOR_ENABLED:
+        return
+
+    statuses = await asyncio.to_thread(get_nas_statuses)
+    issues = nas_alert_issues(statuses)
+    state = load_state()
+
+    if not issues:
+        if state.get("last_nas_alert_signature"):
+            state["last_nas_alert_signature"] = ""
+            state["last_nas_alert_time"] = ""
+            save_state(state)
+
+            await send_long_message(
+                context,
+                ALLOWED_CHAT_ID,
+                "✅ NAS mount restored\n\n" + build_nas_report(statuses),
+            )
+
+        return
+
+    sig = nas_alert_signature(issues)
+
+    if unchanged_alert_in_cooldown(
+        state,
+        sig,
+        signature_key="last_nas_alert_signature",
+        time_key="last_nas_alert_time",
+        cooldown_hours=NAS_ALERT_UNCHANGED_COOLDOWN_HOURS,
+    ):
+        return
+
+    state["last_nas_alert_signature"] = sig
+    state["last_nas_alert_time"] = now_text()
+    save_state(state)
+
+    await send_long_message(
+        context,
+        ALLOWED_CHAT_ID,
+        (
+            "🚨 NAS backup mount problem\n\n"
+            f"{build_nas_report(statuses)}\n\n"
+            "Backup scripts should skip while this is unresolved."
+        ),
+    )
+
 async def alert_job(context: ContextTypes.DEFAULT_TYPE):
     if not ALLOWED_CHAT_ID:
         return
+
+    await maybe_send_nas_alert(context)
 
     try:
         data = await asyncio.to_thread(fetch_storage_status)
@@ -1282,6 +1535,7 @@ def main():
     app.add_handler(CommandHandler("storage", storage_cmd))
     app.add_handler(CommandHandler("smart", smart_cmd))
     app.add_handler(CommandHandler("disks", smart_cmd))
+    app.add_handler(CommandHandler("nas", nas_cmd))
     app.add_handler(CommandHandler("space", space_cmd))
     app.add_handler(CommandHandler("raw", raw_cmd))
     app.add_handler(CommandHandler("intro", intro_cmd))

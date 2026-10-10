@@ -21,7 +21,7 @@ load_dotenv(ROOT_DIR / ".env")
 
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434/api/chat").strip()
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "ua-tech").strip()
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3.5:9b").strip()
 
 MCP_URL = os.getenv("MCP_URL", "http://127.0.0.1:3600/mcp").strip()
 
@@ -29,7 +29,7 @@ MCP_ALLOWED_TOOLS = [
     item.strip()
     for item in os.getenv(
         "MCP_ALLOWED_TOOLS",
-        "zpool_list,zpool_status,zpool_status_x,zfs_list,disk_free,block_devices_json,disk_identity_json,disk_health_attributes_json,storage_usage_json,node_storage_usage_json,smart_devices_json,docker_containers_json,system_services,list_allowed_dir,read_text_file",
+        "zpool_list,zpool_status,zpool_status_x,zfs_list,zfs_table_json,disk_free,block_devices_json,disk_identity_json,disk_health_attributes_json,storage_usage_json,node_storage_usage_json,smart_table_json,smart_nvme_devices_json,smart_devices_json,docker_containers_json,system_services,list_allowed_dir,read_text_file",
     ).split(",")
     if item.strip()
 ]
@@ -392,6 +392,8 @@ class StorageStatusResponse(BaseModel):
     node_storage: list[dict[str, Any]]
     filesystems: list[dict[str, Any]]
     drives: list[dict[str, Any]]
+    smart_table: list[dict[str, Any]]
+    zfs_table: list[dict[str, Any]]
     raw_available: list[str]
 
 
@@ -415,6 +417,7 @@ async def ollama_chat(messages: list[dict], temperature: float = 0.2) -> dict:
     payload = {
         "model": OLLAMA_MODEL,
         "stream": False,
+        "think": False,
         "messages": messages,
         "options": {
             "temperature": temperature,
@@ -632,6 +635,8 @@ def service_line_to_node(line: str) -> Optional[dict[str, Any]]:
     low = line.lower()
     if not any(word in low for word in ("storj", "storagenode", "sia", "siad", "hostd", "renterd", "walletd")):
         return None
+    if any(word in low for word in ("watchdog", "healthcheck", "health check", "restart stale", ".timer")):
+        return None
 
     values = re.split(r"\s+", line.strip(), maxsplit=4)
     if len(values) < 4:
@@ -823,6 +828,27 @@ def extract_node_storage_usage(text: str) -> list[dict[str, Any]]:
     return list(data.get("datasets", []) or [])
 
 
+def extract_smart_table(text: str) -> list[dict[str, Any]]:
+    data = safe_json_loads(text)
+    drives = []
+
+    for item in data.get("drives", []) or []:
+        drives.append({
+            **item,
+            "name": item.get("device") or item.get("name") or item.get("serial", ""),
+            "type": item.get("protocol"),
+            "smart_passed": None,
+            "source": "smartd",
+        })
+
+    return drives
+
+
+def extract_zfs_table(text: str) -> list[dict[str, Any]]:
+    data = safe_json_loads(text)
+    return list(data.get("datasets", []) or [])
+
+
 def merge_disk_tool_data(
     drives: list[dict[str, Any]],
     identities: dict[str, dict[str, Any]],
@@ -904,13 +930,13 @@ async def collect_storage_raw() -> dict[str, str]:
         "zpool_status_x",
         "zpool_status",
         "zfs_list",
+        "zfs_table_json",
         "disk_free",
         "block_devices_json",
-        "disk_identity_json",
-        "disk_health_attributes_json",
         "storage_usage_json",
         "node_storage_usage_json",
-        "smart_devices_json",
+        "smart_table_json",
+        "smart_nvme_devices_json",
         "docker_containers_json",
         "system_services",
     ]
@@ -921,6 +947,16 @@ async def collect_storage_raw() -> dict[str, str]:
             continue
         raw[tool_name] = await mcp_call_tool(tool_name, {})
 
+    snapshot_drives = extract_smart_table(raw.get("smart_table_json", ""))
+    if not snapshot_drives:
+        for tool_name in (
+            "disk_identity_json",
+            "disk_health_attributes_json",
+            "smart_devices_json",
+        ):
+            if tool_name in MCP_ALLOWED_TOOLS:
+                raw[tool_name] = await mcp_call_tool(tool_name, {})
+
     return raw
 
 
@@ -930,7 +966,11 @@ def analyze_storage(raw: dict[str, str], checked_at: str) -> StorageStatusRespon
     pools = parse_zpool_list(raw.get("zpool_list", ""))
     datasets = parse_zfs_list(raw.get("zfs_list", ""))
     filesystems = parse_df(raw.get("disk_free", ""))
-    drives = merge_disk_tool_data(
+    smartd_snapshots = extract_smart_table(raw.get("smart_table_json", ""))
+    nvme_drives = extract_smart_drives(raw.get("smart_nvme_devices_json", ""))
+    smart_table = smartd_snapshots + nvme_drives if smartd_snapshots else []
+    zfs_table = extract_zfs_table(raw.get("zfs_table_json", ""))
+    drives = smart_table or merge_disk_tool_data(
         extract_smart_drives(raw.get("smart_devices_json", "")),
         extract_disk_identities(raw.get("disk_identity_json", "")),
         extract_disk_health_attributes(raw.get("disk_health_attributes_json", "")),
@@ -1014,6 +1054,8 @@ def analyze_storage(raw: dict[str, str], checked_at: str) -> StorageStatusRespon
             )
 
     for drive in drives:
+        if drive.get("connected") is False:
+            continue
         if drive["severity"] >= 2:
             add_issue(
                 issues,
@@ -1038,8 +1080,8 @@ def analyze_storage(raw: dict[str, str], checked_at: str) -> StorageStatusRespon
         if project not in found_projects:
             add_issue(issues, 1, project, msg(f"{project} node не знайдено серед Docker/systemd.", f"{project} node was not found in Docker/systemd."), msg("Якщо node запускається іншим способом, додай її service/container name або інтеграцію.", "If it runs another way, add its service/container name or integration."))
 
-    if "smart_devices_json" not in raw:
-        add_issue(issues, 1, "smart", msg("SMART tool не дозволений у MCP_ALLOWED_TOOLS.", "SMART tool is not allowed in MCP_ALLOWED_TOOLS."), msg("Додай smart_devices_json в MCP_ALLOWED_TOOLS.", "Add smart_devices_json to MCP_ALLOWED_TOOLS."))
+    if "smart_table_json" not in raw and "smart_devices_json" not in raw:
+        add_issue(issues, 1, "smart", msg("SMART tools не дозволені у MCP_ALLOWED_TOOLS.", "SMART tools are not allowed in MCP_ALLOWED_TOOLS."), msg("Додай smart_table_json або smart_devices_json в MCP_ALLOWED_TOOLS.", "Add smart_table_json or smart_devices_json to MCP_ALLOWED_TOOLS."))
     elif not drives:
         add_issue(issues, 1, "smart", msg("SMART диски не знайдені або smartctl не прочитав дані.", "SMART disks were not found or smartctl could not read data."), msg("Перевір smartmontools і права доступу.", "Check smartmontools and permissions."))
 
@@ -1062,9 +1104,10 @@ def analyze_storage(raw: dict[str, str], checked_at: str) -> StorageStatusRespon
 
     healthy_pools = sum(1 for pool in pools if pool.get("health") == "ONLINE")
     running_nodes = sum(1 for node in nodes if node.get("status") == "ok")
+    connected_drives = sum(1 for drive in drives if drive.get("connected") is not False)
     summary = (
         f"{msg('Статус', 'Status')}: {status}. Pools ONLINE: {healthy_pools}/{len(pools)}. "
-        f"Nodes running: {running_nodes}/{len(nodes)}. SMART drives: {len(drives)}. "
+        f"Nodes running: {running_nodes}/{len(nodes)}. SMART drives: {connected_drives}/{len(drives)}. "
         f"Issues: {len(issues)}."
     )
 
@@ -1081,6 +1124,8 @@ def analyze_storage(raw: dict[str, str], checked_at: str) -> StorageStatusRespon
         node_storage=node_storage,
         filesystems=filesystems,
         drives=drives,
+        smart_table=smart_table,
+        zfs_table=zfs_table,
         raw_available=sorted(raw.keys()),
     )
 
@@ -1431,9 +1476,11 @@ def compact_storage_status(status: StorageStatusResponse) -> dict[str, Any]:
         ],
         "filesystems_over_80": filesystems_over_80[:25],
         "node_storage_over_80": node_storage_over_80[:25],
+        "zfs_table": status.zfs_table,
+        "smart_table": status.smart_table,
         "drives_not_ok": [
             drive for drive in status.drives
-            if drive.get("status") != "ok"
+            if drive.get("connected") is not False and drive.get("status") != "ok"
         ],
         "nodes_total": len(status.nodes),
         "nodes_not_ok": [
@@ -1463,7 +1510,7 @@ def format_storage_advisor_local_report(status: StorageStatusResponse) -> str:
     ]
     drive_warnings = [
         drive for drive in status.drives
-        if drive.get("status") != "ok"
+        if drive.get("connected") is not False and drive.get("status") != "ok"
     ]
     critical_issues = [
         issue for issue in status.issues
