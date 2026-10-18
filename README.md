@@ -147,6 +147,56 @@ Set `GATEWAY_HOST` in your local `.env` to a trusted LAN address if you need acc
 
 The chat page can use the routed agent, plain Ollama, web-assisted answers, or ZFS/storage mode.
 
+## Independent Storage Watchdog
+
+`scripts/storage-watchdog` is a root-level, config-driven watchdog that can run
+independently of the gateway and Telegram bot process. It can monitor expected
+ZFS pools, Docker containers, HTTP endpoints, PCI controller drivers, active
+SMART long tests, and recent kernel storage errors. It sends alerts on state
+changes, repeats unresolved alerts at a configurable interval, and sends a
+recovery notification.
+
+The repository intentionally contains no real host inventory. Copy the example
+configuration outside the repository and fill in local values there:
+
+```bash
+sudo install -m 0755 scripts/storage-watchdog /usr/local/sbin/storage-watchdog
+sudo install -m 0600 systemd/storage-watchdog.example.json /etc/storage-watchdog.json
+sudo nano /etc/storage-watchdog.json
+```
+
+Create a root-only Telegram environment file referenced by the JSON config:
+
+```bash
+sudo install -m 0600 /dev/null /etc/storage-watchdog.telegram.env
+sudo nano /etc/storage-watchdog.telegram.env
+```
+
+It must define `BOT_TOKEN` and `ALLOWED_CHAT_ID`. Never add the populated JSON
+or Telegram environment file to Git. Pool names, node ports, disk identifiers,
+local addresses, and captured watchdog output are private deployment data.
+
+Validate the configuration without sending a message:
+
+```bash
+sudo /usr/local/sbin/storage-watchdog --config /etc/storage-watchdog.json --print-only
+```
+
+Install and enable the timer:
+
+```bash
+sudo install -m 0644 systemd/storage-watchdog.service /etc/systemd/system/
+sudo install -m 0644 systemd/storage-watchdog.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now storage-watchdog.timer
+```
+
+Optionally verify Telegram delivery:
+
+```bash
+sudo /usr/local/sbin/storage-watchdog --config /etc/storage-watchdog.json --test-message
+```
+
 Stop services:
 
 ```bash

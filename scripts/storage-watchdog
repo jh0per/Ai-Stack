@@ -1,0 +1,436 @@
+#!/usr/bin/env python3
+"""Config-driven storage, node, controller and SMART Telegram watchdog."""
+
+from __future__ import annotations
+
+import argparse
+import concurrent.futures
+import fcntl
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+
+DEFAULT_CONFIG_FILE = Path("/etc/storage-watchdog.json")
+DEFAULT_STATE_FILE = Path("/var/lib/storage-watchdog/state.json")
+LOCK_FILE = Path("/run/storage-watchdog.lock")
+
+
+def run(command: list[str], timeout: int = 15) -> tuple[int, str, str]:
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        return result.returncode, result.stdout.strip(), result.stderr.strip()
+    except Exception as exc:
+        return 999, "", str(exc)
+
+
+def load_config(path: Path) -> dict[str, Any]:
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"cannot read config {path}: {exc}") from exc
+    if not isinstance(config, dict):
+        raise RuntimeError(f"config {path} must contain a JSON object")
+    return config
+
+
+def load_env(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    try:
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+            values[key.strip()] = value
+    except OSError as exc:
+        print(f"Cannot read Telegram environment: {exc}", file=sys.stderr)
+    return values
+
+
+def state_file(config: dict[str, Any]) -> Path:
+    return Path(config.get("state_file", str(DEFAULT_STATE_FILE)))
+
+
+def load_state(config: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return json.loads(state_file(config).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_state(config: dict[str, Any], state: dict[str, Any]) -> None:
+    path = state_file(config)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.chmod(temporary, 0o600)
+    temporary.replace(path)
+
+
+def telegram_send(config: dict[str, Any], text: str) -> bool:
+    env_path = Path(config.get("telegram_env_file", "/etc/storage-watchdog.telegram.env"))
+    env = load_env(env_path)
+    token = env.get("BOT_TOKEN", "").strip()
+    chat_id = env.get("ALLOWED_CHAT_ID", "").strip()
+    if not token or not chat_id:
+        print("BOT_TOKEN or ALLOWED_CHAT_ID is missing", file=sys.stderr)
+        return False
+
+    payload = urllib.parse.urlencode({"chat_id": chat_id, "text": text}).encode()
+    request = urllib.request.Request(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        data=payload,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            body = json.loads(response.read().decode("utf-8"))
+            if response.status == 200 and body.get("ok"):
+                return True
+            print(f"Telegram rejected message: HTTP {response.status}", file=sys.stderr)
+    except Exception as exc:
+        print(f"Telegram send failed: {exc}", file=sys.stderr)
+    return False
+
+
+def http_status(url: str, timeout: float) -> int:
+    request = urllib.request.Request(url, headers={"User-Agent": "storage-watchdog/1.0"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status
+    except urllib.error.HTTPError as exc:
+        return exc.code
+    except Exception:
+        return 0
+
+
+def boot_uptime() -> float:
+    try:
+        return float(Path("/proc/uptime").read_text().split()[0])
+    except Exception:
+        return 0
+
+
+def check_pools(config: dict[str, Any], issues: list[str]) -> None:
+    zfs_config = config.get("zfs", {})
+    if not zfs_config.get("enabled", False):
+        return
+
+    zpool = str(zfs_config.get("zpool_binary", "/usr/sbin/zpool"))
+    expected = set(zfs_config.get("expected_pools", []))
+    rc, output, error = run([zpool, "list", "-H", "-o", "name,health"])
+    if rc != 0:
+        issues.append(f"ZFS status unavailable: {error or output or f'rc={rc}'}")
+        return
+
+    actual: dict[str, str] = {}
+    for line in output.splitlines():
+        fields = line.split()
+        if len(fields) >= 2:
+            actual[fields[0]] = fields[1]
+
+    missing = sorted(expected - set(actual))
+    if missing:
+        issues.append(f"ZFS pools missing ({len(missing)}): {', '.join(missing)}")
+
+    bad = [f"{name}={health}" for name, health in sorted(actual.items()) if health != "ONLINE"]
+    if bad:
+        issues.append("ZFS pools not ONLINE: " + ", ".join(bad))
+
+    rc, output, error = run([zpool, "status", "-x"])
+    if rc != 0 or output != "all pools are healthy":
+        summary = (output or error or f"rc={rc}").replace("\n", " ")[:500]
+        issues.append(f"ZFS reports errors: {summary}")
+
+
+def check_controllers(config: dict[str, Any], issues: list[str]) -> None:
+    for controller in config.get("controllers", []):
+        address = str(controller.get("pci_address", "")).strip()
+        expected_driver = str(controller.get("driver", "")).strip()
+        if not address:
+            continue
+        driver_link = Path(f"/sys/bus/pci/devices/{address}/driver")
+        if not driver_link.exists():
+            issues.append(f"Controller {address}: device/driver missing")
+            continue
+        try:
+            driver = driver_link.resolve().name
+        except OSError as exc:
+            issues.append(f"Controller {address}: cannot read driver ({exc})")
+            continue
+        if expected_driver and driver != expected_driver:
+            issues.append(f"Controller {address}: driver={driver}, expected {expected_driver}")
+
+
+def docker_running_names(config: dict[str, Any], issues: list[str]) -> set[str] | None:
+    docker = str(config.get("docker_binary", "/usr/bin/docker"))
+    rc, output, error = run([docker, "ps", "--filter", "status=running", "--format", "{{.Names}}"], timeout=20)
+    if rc != 0:
+        issues.append(f"Docker unavailable: {error or output or f'rc={rc}'}")
+        return None
+    return set(output.splitlines())
+
+
+def check_nodes_and_http(config: dict[str, Any], issues: list[str]) -> None:
+    groups = config.get("docker_groups", [])
+    if groups:
+        running = docker_running_names(config, issues)
+        if running is not None:
+            for group in groups:
+                label = str(group.get("name", "Docker"))
+                expected = [str(name) for name in group.get("containers", [])]
+                missing = [name for name in expected if name not in running]
+                if missing:
+                    issues.append(f"{label} containers down ({len(missing)}): {', '.join(missing)}")
+
+    checks = config.get("http_checks", [])
+    if not checks:
+        return
+
+    def probe(check: dict[str, Any]) -> tuple[str, int, list[int]]:
+        label = str(check.get("name", check.get("url", "HTTP")))
+        url = str(check.get("url", ""))
+        allowed = [int(code) for code in check.get("ok_statuses", [200])]
+        timeout = float(check.get("timeout_seconds", 4))
+        return label, http_status(url, timeout) if url else 0, allowed
+
+    workers = min(12, max(1, len(checks)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        results = list(executor.map(probe, checks))
+
+    failed = [f"{label}={code or 'timeout'}" for label, code, allowed in results if code not in allowed]
+    if failed:
+        issues.append(f"HTTP checks unhealthy ({len(failed)}): {', '.join(failed)}")
+
+
+def smart_state(
+    smartctl: str,
+    test: dict[str, Any],
+    tmux_alive: bool,
+    require_tmux: bool,
+    stale_minutes: int,
+    issues: list[str],
+) -> tuple[str, str]:
+    name = str(test.get("name", "unnamed-disk"))
+    device = Path(str(test.get("device", "")))
+    log_value = str(test.get("log", "")).strip()
+    log_file = Path(log_value) if log_value else None
+    if not device.exists():
+        issues.append(f"SMART {name}: disk missing ({device})")
+        return name, "missing"
+
+    rc, capability, error = run([smartctl, "-c", str(device)], timeout=20)
+    if rc not in (0, 2) and not capability:
+        issues.append(f"SMART {name}: cannot read test status ({error or f'rc={rc}'})")
+        return name, "unavailable"
+
+    if "Self-test routine in progress" in capability:
+        remaining_match = re.search(r"(\d+)% of test remaining", capability)
+        remaining = f"{remaining_match.group(1)}%" if remaining_match else "unknown"
+        if require_tmux and not tmux_alive:
+            issues.append(f"SMART {name}: test runs but tmux monitor is absent")
+        if log_file:
+            try:
+                age = time.time() - log_file.stat().st_mtime
+                if age > stale_minutes * 60:
+                    issues.append(f"SMART {name}: monitor log stale for {int(age // 60)} min")
+            except OSError:
+                issues.append(f"SMART {name}: monitor log missing")
+        return name, f"running:{remaining}"
+
+    rc, selftest_log, error = run([smartctl, "-l", "selftest", str(device)], timeout=20)
+    latest = next((line.strip() for line in selftest_log.splitlines() if line.lstrip().startswith("# 1")), "")
+    if "Completed without error" in latest:
+        return name, "completed_ok"
+    if latest:
+        issues.append(f"SMART {name}: latest test not successful: {latest}")
+        return name, "completed_bad"
+    issues.append(f"SMART {name}: no latest test result ({error or f'rc={rc}'})")
+    return name, "unknown"
+
+
+def check_smart(config: dict[str, Any], issues: list[str]) -> dict[str, str]:
+    tests = config.get("smart_tests", [])
+    if not tests:
+        return {}
+    tmux_session = str(config.get("smart_tmux_session", "")).strip()
+    require_tmux = bool(tmux_session)
+    tmux_alive = True
+    if require_tmux:
+        tmux = str(config.get("tmux_binary", "/usr/bin/tmux"))
+        rc, _, _ = run([tmux, "has-session", "-t", tmux_session], timeout=5)
+        tmux_alive = rc == 0
+
+    smartctl = str(config.get("smartctl_binary", "/usr/sbin/smartctl"))
+    stale_minutes = int(config.get("smart_log_stale_minutes", 15))
+    states: dict[str, str] = {}
+    for test in tests:
+        name, status = smart_state(
+            smartctl,
+            test,
+            tmux_alive,
+            require_tmux,
+            stale_minutes,
+            issues,
+        )
+        states[name] = status
+    return states
+
+
+def check_recent_kernel(config: dict[str, Any], issues: list[str]) -> None:
+    if not config.get("kernel_storage_error_check", True):
+        return
+    rc, output, _ = run(
+        ["/usr/bin/journalctl", "-k", "--since", "2 minutes ago", "--no-pager", "-o", "cat"],
+        timeout=15,
+    )
+    if rc != 0 or not output:
+        return
+    patterns = re.compile(
+        r"mpt3sas.*(?:dead[_ ]ioc|fault|failed|failure|device not present)|"
+        r"(?:Buffer I/O error|blk_update_request: I/O error|critical medium error)|"
+        r"pcieport.*D3cold",
+        re.IGNORECASE,
+    )
+    matches = [line.strip() for line in output.splitlines() if patterns.search(line)]
+    if matches:
+        unique = list(dict.fromkeys(matches))[-5:]
+        issues.append("Recent kernel storage errors: " + " | ".join(unique)[:900])
+
+
+def signature(issues: list[str]) -> str:
+    return hashlib.sha256("\n".join(sorted(issues)).encode("utf-8")).hexdigest()
+
+
+def format_message(config: dict[str, Any], title: str, lines: list[str]) -> str:
+    now = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+    label = str(config.get("host_label", os.uname().nodename))
+    body = "\n".join(f"• {line}" for line in lines)
+    message = f"{title}\nHost: {label}\nTime: {now}"
+    if body:
+        message += "\n\n" + body
+    return message[:4000]
+
+
+def evaluate(config: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
+    issues: list[str] = []
+    check_pools(config, issues)
+    check_controllers(config, issues)
+    smart_states = check_smart(config, issues)
+    grace_seconds = int(config.get("node_boot_grace_minutes", 10)) * 60
+    if boot_uptime() >= grace_seconds:
+        check_nodes_and_http(config, issues)
+    check_recent_kernel(config, issues)
+    return issues, smart_states
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_FILE)
+    parser.add_argument("--test-message", action="store_true")
+    parser.add_argument("--print-only", action="store_true")
+    args = parser.parse_args()
+
+    try:
+        config = load_config(args.config)
+    except RuntimeError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+
+    LOCK_FILE.touch(mode=0o600, exist_ok=True)
+    with LOCK_FILE.open("r+") as lock_handle:
+        try:
+            fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("Another watchdog instance is still running")
+            return 0
+
+        issues, smart_states = evaluate(config)
+        state = load_state(config)
+        previous_smart = state.get("smart_states", {})
+        completion_names: list[str] = []
+        events: list[str] = []
+        for name, current in smart_states.items():
+            previous = previous_smart.get(name, "")
+            if current == "completed_ok" and (
+                previous.startswith("running:") or previous == "completed_ok_pending"
+            ):
+                events.append(f"SMART long test {name} completed without error")
+                completion_names.append(name)
+
+        print(json.dumps({"issues": issues, "smart": smart_states}, indent=2))
+        if args.print_only:
+            return 1 if issues else 0
+
+        if args.test_message:
+            expected_pools = len(config.get("zfs", {}).get("expected_pools", []))
+            expected_containers = sum(
+                len(group.get("containers", [])) for group in config.get("docker_groups", [])
+            )
+            summary = [
+                f"Expected ZFS pools: {expected_pools}",
+                f"Expected Docker containers: {expected_containers}",
+                f"HTTP checks: {len(config.get('http_checks', []))}",
+                "Telegram delivery test successful",
+            ]
+            if not telegram_send(config, format_message(config, "✅ Storage watchdog installed", summary)):
+                return 2
+
+        now = int(time.time())
+        current_signature = signature(issues) if issues else ""
+        previous_signature = str(state.get("issue_signature", ""))
+        last_alert = int(state.get("last_alert_epoch", 0) or 0)
+        repeat_seconds = int(config.get("repeat_alert_minutes", 30)) * 60
+
+        if issues:
+            should_alert = current_signature != previous_signature or now - last_alert >= repeat_seconds
+            if should_alert and telegram_send(
+                config,
+                format_message(config, "🚨 Storage watchdog detected a problem", issues),
+            ):
+                state["last_alert_epoch"] = now
+                state["issue_signature"] = current_signature
+        elif previous_signature:
+            if telegram_send(
+                config,
+                format_message(config, "✅ Storage watchdog: all monitored systems recovered", []),
+            ):
+                state["issue_signature"] = ""
+                state["last_alert_epoch"] = now
+
+        if events and not telegram_send(
+            config,
+            format_message(config, "✅ Disk test completed", events),
+        ):
+            for name in completion_names:
+                smart_states[name] = "completed_ok_pending"
+
+        state["smart_states"] = smart_states
+        state["last_check_epoch"] = now
+        state["last_issue_count"] = len(issues)
+        save_state(config, state)
+        return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

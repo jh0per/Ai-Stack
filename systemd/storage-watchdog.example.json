@@ -1,0 +1,55 @@
+{
+  "host_label": "storage-host",
+  "telegram_env_file": "/etc/storage-watchdog.telegram.env",
+  "state_file": "/var/lib/storage-watchdog/state.json",
+  "repeat_alert_minutes": 30,
+  "node_boot_grace_minutes": 10,
+  "zfs": {
+    "enabled": true,
+    "expected_pools": [
+      "example-pool"
+    ]
+  },
+  "controllers": [
+    {
+      "pci_address": "0000:00:00.0",
+      "driver": "mpt3sas"
+    }
+  ],
+  "docker_groups": [
+    {
+      "name": "Storj",
+      "containers": [
+        "storagenode-example"
+      ]
+    },
+    {
+      "name": "Sia",
+      "containers": [
+        "sia-example"
+      ]
+    }
+  ],
+  "http_checks": [
+    {
+      "name": "Storj example",
+      "url": "http://127.0.0.1:14002/",
+      "ok_statuses": [200]
+    },
+    {
+      "name": "Sia example",
+      "url": "http://127.0.0.1:9980/api/host",
+      "ok_statuses": [200, 401]
+    }
+  ],
+  "smart_tmux_session": "disk-tests",
+  "smart_log_stale_minutes": 15,
+  "smart_tests": [
+    {
+      "name": "disk-example",
+      "device": "/dev/disk/by-id/wwn-0xREPLACE_ME",
+      "log": "/var/log/storage-watchdog/disk-example.log"
+    }
+  ],
+  "kernel_storage_error_check": true
+}

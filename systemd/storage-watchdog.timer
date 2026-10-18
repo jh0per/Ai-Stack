@@ -1,0 +1,13 @@
+[Unit]
+Description=Run storage watchdog every minute
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1min
+AccuracySec=10s
+RandomizedDelaySec=5s
+Persistent=true
+Unit=storage-watchdog.service
+
+[Install]
+WantedBy=timers.target

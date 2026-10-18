@@ -1,0 +1,11 @@
+[Unit]
+Description=Storage, node and SMART Telegram watchdog
+After=network-online.target docker.service zfs-mount.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/storage-watchdog --config /etc/storage-watchdog.json
+TimeoutStartSec=55
+User=root
+Group=root
